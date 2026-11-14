@@ -23,7 +23,7 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 func newDL() *downloader.HTTPDownloader {
-	return downloader.NewHTTPDownloader(nil)
+	return downloader.NewHTTPDownloader(nil, downloader.WithAllowPrivateAddresses())
 }
 
 // serve returns a test server that always responds with body and the given

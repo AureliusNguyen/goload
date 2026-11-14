@@ -273,6 +273,15 @@ func (s *service) CreateTask(ctx context.Context, param *CreateTaskParam) (*Task
 		}
 	}
 
+	switch strings.ToLower(parseUrl.Scheme) {
+	case "http", "https", "ftp":
+	default:
+		return nil, &errors.Error{
+			Code:    errors.ErrCodeInvalidInput,
+			Message: "Unsupported SourceURL scheme",
+		}
+	}
+
 	if param.FileName == "" {
 		param.FileName = parseUrl.Path
 	}

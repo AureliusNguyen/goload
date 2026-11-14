@@ -305,7 +305,7 @@ func buildSystem(t *testing.T, brokers []string) (
 	)
 
 	// Register HTTP/HTTPS downloaders via the Registrar interface
-	httpDl := downloader.NewHTTPDownloader(nil)
+	httpDl := downloader.NewHTTPDownloader(nil, downloader.WithAllowPrivateAddresses())
 	dlSvc.RegisterDownloader("HTTP", httpDl)
 	dlSvc.RegisterDownloader("HTTPS", httpDl)
 

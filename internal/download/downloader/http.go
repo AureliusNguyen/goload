@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/go-kit/log"
@@ -33,8 +35,9 @@ const defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 //   - Per-task download speed throttling via a token-bucket rate limiter
 //   - Custom request headers and Bearer/Basic authentication
 type HTTPDownloader struct {
-	client *http.Client
-	logger log.Logger
+	client                *http.Client
+	logger                log.Logger
+	allowPrivateAddresses bool
 }
 
 // HTTPDownloaderOption configures an HTTPDownloader.
@@ -49,13 +52,72 @@ func WithHTTPLogger(logger log.Logger) HTTPDownloaderOption {
 	}
 }
 
+// WithAllowPrivateAddresses disables the SSRF guard so the downloader may
+// connect to loopback, private, and link-local addresses. Off by default.
+// Intended for tests and for deployments that must fetch specific internal
+// hosts behind an explicit allowlist.
+func WithAllowPrivateAddresses() HTTPDownloaderOption {
+	return func(h *HTTPDownloader) {
+		h.allowPrivateAddresses = true
+	}
+}
+
+// isDisallowedIP reports whether ip is a non-public address an SSRF guard must
+// refuse: loopback, link-local (incl. cloud metadata 169.254.169.254), private,
+// unspecified, and multicast ranges, for both IPv4 and IPv6.
+func isDisallowedIP(ip net.IP) bool {
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	return ip.IsLoopback() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsInterfaceLocalMulticast() ||
+		ip.IsMulticast() ||
+		ip.IsUnspecified() ||
+		ip.IsPrivate()
+}
+
+// newSSRFSafeDialer returns a dialer whose Control hook rejects connections to
+// non-public addresses. Control runs after DNS resolution with the actual IP
+// about to be dialed, so it covers every redirect hop and defeats DNS
+// rebinding (we validate the resolved IP, not the hostname).
+func newSSRFSafeDialer(allowPrivate bool) *net.Dialer {
+	d := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	if allowPrivate {
+		return d
+	}
+	d.Control = func(network, address string, _ syscall.RawConn) error {
+		host, _, err := net.SplitHostPort(address)
+		if err != nil {
+			return err
+		}
+		ip := net.ParseIP(host)
+		if ip == nil {
+			return fmt.Errorf("refusing to dial %q: cannot parse IP", address)
+		}
+		if isDisallowedIP(ip) {
+			return fmt.Errorf("refusing to connect to non-public address %s", ip)
+		}
+		return nil
+	}
+	return d
+}
+
 // NewHTTPDownloader returns an HTTPDownloader that uses the provided *http.Client.
 // Pass nil to use a sensible default with a 30-second timeout.
 func NewHTTPDownloader(client *http.Client, opts ...HTTPDownloaderOption) *HTTPDownloader {
+	h := &HTTPDownloader{
+		logger: log.NewNopLogger(),
+	}
+	for _, opt := range opts {
+		opt(h)
+	}
 	if client == nil {
 		client = &http.Client{
 			Timeout: 30 * time.Minute, // long-running download; individual dial is handled by transport
 			Transport: &http.Transport{
+				DialContext:           newSSRFSafeDialer(h.allowPrivateAddresses).DialContext,
 				MaxIdleConnsPerHost:   4,
 				IdleConnTimeout:       90 * time.Second,
 				TLSHandshakeTimeout:   10 * time.Second,
@@ -64,13 +126,7 @@ func NewHTTPDownloader(client *http.Client, opts ...HTTPDownloaderOption) *HTTPD
 			},
 		}
 	}
-	h := &HTTPDownloader{
-		client: client,
-		logger: log.NewNopLogger(),
-	}
-	for _, opt := range opts {
-		opt(h)
-	}
+	h.client = client
 	return h
 }
 
