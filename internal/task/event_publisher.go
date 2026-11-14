@@ -241,6 +241,8 @@ func outboxTopic(eventType string) (string, bool) {
 	switch eventType {
 	case OutboxEventTaskCreated:
 		return "task.created", true
+	case OutboxEventTaskCompleted:
+		return "task.completed", true
 	default:
 		return "", false
 	}

@@ -144,3 +144,25 @@ func TestPublishOutboxEvent_InmemRequiresSubscriber(t *testing.T) {
 		t.Fatal("timeout waiting for task.created message")
 	}
 }
+
+func TestPublishOutboxEvent_TaskCompletedGoesToTaskCompletedTopic(t *testing.T) {
+	transport := &recordingPublisher{}
+	pub := NewEventPublisher(transport)
+	event := OutboxEvent{
+		ID:          "evt-done",
+		AggregateID: 42,
+		Destination: OutboxDestinationLifecycle,
+		EventType:   OutboxEventTaskCompleted,
+		Payload:     []byte(`{"task_id":42}`),
+		CreatedAt:   time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+	}
+
+	require.NoError(t, pub.PublishOutboxEvent(context.Background(), event))
+
+	got := transport.snapshot()
+	require.Len(t, got, 1)
+	require.Equal(t, "task.completed", got[0].topic)
+	require.Equal(t, "evt-done", got[0].msg.UUID)
+	require.Equal(t, `{"task_id":42}`, string(got[0].msg.Payload))
+	require.Equal(t, message.Metadata{"eventType": "TaskCompleted", "taskID": "42"}, got[0].msg.Metadata)
+}
