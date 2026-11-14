@@ -78,6 +78,14 @@ func main() {
 	tx := taskmysql.NewTxManager(db)
 	outboxRepo := taskmysql.NewOutboxRepo(db)
 
+	// The task service requires a message transport: it dispatches TaskCreated
+	// through the outbox relay and publishes task lifecycle events. Without a
+	// transport, outbox rows would pile up undispatched, so refuse to start.
+	if len(config.KafkaBrokers) == 0 {
+		level.Error(logger).Log("msg", "KAFKA_BROKERS is required for the task service; refusing to start without a transport")
+		os.Exit(1)
+	}
+
 	// messaging publisher (kafka) if configured
 	var pub message.Publisher
 	if len(config.KafkaBrokers) > 0 {
@@ -102,13 +110,7 @@ func main() {
 
 	// Outbox relay: publishes the TaskCreated rows that CreateTask/RetryTask
 	// write in the task transaction, on the same Kafka topic as before.
-	var outboxRelay *taskpkg.OutboxRelay
-	if pub != nil {
-		outboxRelay = taskpkg.NewOutboxRelay(outboxRepo, dep, taskpkg.WithOutboxRelayLogger(logger))
-	} else {
-		level.Warn(logger).
-			Log("msg", "KAFKA_BROKERS not set: outbox relay disabled, TaskCreated events stay unsent")
-	}
+	outboxRelay := taskpkg.NewOutboxRelay(outboxRepo, dep, taskpkg.WithOutboxRelayLogger(logger))
 
 	// Optional: presigner (MinIO) and token store (Redis) for GenerateDownloadURL
 	var svcOpts []taskpkg.ServiceOption
