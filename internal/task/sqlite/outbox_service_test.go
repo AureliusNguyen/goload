@@ -35,7 +35,7 @@ func TestCreateTask_CommitsOutboxRowThenRelayPublishes(t *testing.T) {
 	outbox := NewOutboxRepo(pool)
 	msgPub, msgSub := inmem.NewPublisherAndSubscriber(log.NewNopLogger())
 	taskPub := task.NewEventPublisher(msgPub)
-	svc := task.NewService(repo, *taskPub, NewTxManager(pool), outbox)
+	svc := task.NewService(repo, *taskPub, NewTxManager(pool), outbox, NewAttemptRepo(pool))
 	ctx := context.Background()
 
 	ch, err := msgSub.Subscribe(t.Context(), "task.created")
@@ -93,6 +93,7 @@ func TestCreateTask_OutboxFailureRollsBackTaskRow(t *testing.T) {
 	svc := task.NewService(
 		repo, task.Publisher{}, NewTxManager(pool),
 		failAfterInsertOutbox{OutboxRepository: outbox, err: boom},
+		NewAttemptRepo(pool),
 	)
 	ctx := context.Background()
 
@@ -115,7 +116,7 @@ func TestRetryTask_CommitsPendingStatusAndOutboxRow(t *testing.T) {
 	pool := newTestPool(t)
 	repo := NewTaskRepo(pool)
 	outbox := NewOutboxRepo(pool)
-	svc := task.NewService(repo, task.Publisher{}, NewTxManager(pool), outbox)
+	svc := task.NewService(repo, task.Publisher{}, NewTxManager(pool), outbox, NewAttemptRepo(pool))
 	ctx := context.Background()
 
 	failed := pendingTask(7)
@@ -144,6 +145,7 @@ func TestRetryTask_OutboxFailureKeepsTaskFailed(t *testing.T) {
 	svc := task.NewService(
 		repo, task.Publisher{}, NewTxManager(pool),
 		failAfterInsertOutbox{OutboxRepository: outbox, err: boom},
+		NewAttemptRepo(pool),
 	)
 	ctx := context.Background()
 

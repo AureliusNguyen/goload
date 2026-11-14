@@ -85,6 +85,7 @@ func main() {
 	taskRepo := tasksqlite.NewTaskRepo(pool)
 	tx := tasksqlite.NewTxManager(pool)
 	outboxRepo := tasksqlite.NewOutboxRepo(pool)
+	attemptRepo := tasksqlite.NewAttemptRepo(pool)
 
 	// Password hasher
 	bcryptHasher := bcrypt.NewHasher(10)
@@ -111,7 +112,7 @@ func main() {
 	// write in the task transaction, on the same in-memory bus as before.
 	outboxRelay := task.NewOutboxRelay(outboxRepo, taskPub, task.WithOutboxRelayLogger(logger))
 	tokenStore := task.NewInmemTokenStore()
-	taskSvc := task.NewService(taskRepo, *taskPub, tx, outboxRepo,
+	taskSvc := task.NewService(taskRepo, *taskPub, tx, outboxRepo, attemptRepo,
 		task.WithTokenStore(tokenStore),
 		// Local filesystem presigns are file:// URLs, which browsers will not
 		// open from the web UI. Use the HTTP /download token route in pocket mode.

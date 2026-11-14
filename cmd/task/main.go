@@ -77,6 +77,7 @@ func main() {
 	repo := taskmysql.NewTaskRepo(db)
 	tx := taskmysql.NewTxManager(db)
 	outboxRepo := taskmysql.NewOutboxRepo(db)
+	attemptRepo := taskmysql.NewAttemptRepo(db)
 
 	// The task service requires a message transport: it dispatches TaskCreated
 	// through the outbox relay and publishes task lifecycle events. Without a
@@ -201,7 +202,7 @@ func main() {
 		svcOpts = append(svcOpts, taskpkg.WithTokenStore(ts))
 	}
 
-	svc := taskpkg.NewService(repo, *dep, tx, outboxRepo, append(svcOpts, taskpkg.WithLogger(logger))...)
+	svc := taskpkg.NewService(repo, *dep, tx, outboxRepo, attemptRepo, append(svcOpts, taskpkg.WithLogger(logger))...)
 
 	endpointSet := taskendpoint.New(svc)
 

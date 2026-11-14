@@ -35,7 +35,7 @@ func TestCreateTask_WritesOutboxRowAndDoesNotPublish(t *testing.T) {
 	repo := &fakeRepo{}
 	outbox := &memOutbox{}
 	transport := &fakeMessagePublisher{}
-	svc := NewService(repo, *NewEventPublisher(transport), fakeTxManager{}, outbox)
+	svc := NewService(repo, *NewEventPublisher(transport), fakeTxManager{}, outbox, newMemAttempts())
 
 	created, err := svc.CreateTask(context.Background(), &CreateTaskParam{
 		OfAccountID: 7,
@@ -71,7 +71,7 @@ func TestCreateTask_OutboxInsertFailureFailsCreate(t *testing.T) {
 	insertErr := errors.New("outbox insert failed")
 	outbox := &memOutbox{insertErr: insertErr}
 	transport := &fakeMessagePublisher{}
-	svc := NewService(&fakeRepo{}, *NewEventPublisher(transport), fakeTxManager{}, outbox)
+	svc := NewService(&fakeRepo{}, *NewEventPublisher(transport), fakeTxManager{}, outbox, newMemAttempts())
 
 	created, err := svc.CreateTask(context.Background(), &CreateTaskParam{
 		OfAccountID: 7,
@@ -89,12 +89,16 @@ func TestRetryTask_WritesOutboxRowAndDoesNotPublish(t *testing.T) {
 	repo := &stubGetRepo{task: failedTaskFixture()}
 	outbox := &memOutbox{}
 	transport := &fakeMessagePublisher{}
-	svc := NewService(repo, *NewEventPublisher(transport), fakeTxManager{}, outbox)
+	attempts := newMemAttempts(AttemptState{TaskID: 55, Status: StatusFailed, RetryCount: 4, MaxRetries: 3})
+	svc := NewService(repo, *NewEventPublisher(transport), fakeTxManager{}, outbox, attempts)
 
 	require.NoError(t, svc.RetryTask(context.Background(), 55))
 
-	require.NotNil(t, repo.updated)
-	require.Equal(t, StatusPending, repo.updated.Status)
+	st, err := attempts.GetAttemptState(context.Background(), 55)
+	require.NoError(t, err)
+	require.Equal(t, StatusPending, st.Status)
+	require.Zero(t, st.RetryCount, "a user retry grants a fresh retry budget")
+	require.Nil(t, repo.updated, "the status change goes through the ownership state, not a partial update")
 	require.Empty(t, transport.msgs, "RetryTask must not publish directly any more")
 
 	queued := outbox.snapshot()
@@ -114,7 +118,8 @@ func TestRetryTask_OutboxInsertFailureFailsRetry(t *testing.T) {
 	repo := &stubGetRepo{task: failedTaskFixture()}
 	outbox := &memOutbox{insertErr: insertErr}
 	transport := &fakeMessagePublisher{}
-	svc := NewService(repo, *NewEventPublisher(transport), fakeTxManager{}, outbox)
+	attempts := newMemAttempts(AttemptState{TaskID: 55, Status: StatusFailed})
+	svc := NewService(repo, *NewEventPublisher(transport), fakeTxManager{}, outbox, attempts)
 
 	err := svc.RetryTask(context.Background(), 55)
 

@@ -114,6 +114,7 @@ func main() {
 	taskRepo := tasksqlite.NewTaskRepo(pool)
 	tx := tasksqlite.NewTxManager(pool)
 	outboxRepo := tasksqlite.NewOutboxRepo(pool)
+	attemptRepo := tasksqlite.NewAttemptRepo(pool)
 
 	var tokenManager auth.TokenManager
 	{
@@ -161,7 +162,7 @@ func main() {
 		inmemcache.New[string, storage.TokenMetadata](5*time.Minute),
 		secret,
 	)
-	taskSvc := task.NewService(taskRepo, *taskPub, tx, outboxRepo,
+	taskSvc := task.NewService(taskRepo, *taskPub, tx, outboxRepo, attemptRepo,
 		task.WithTokenStore(tokenStore),
 		task.WithTaskSourceStore(storageBackend),
 		task.WithTaskSourcePresigner(storageBackend),
