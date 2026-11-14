@@ -33,3 +33,21 @@ func TestPublishTaskCreated_LegacyWireFormat_FreshTask(t *testing.T) {
 	require.Len(t, transport.msgs, 1)
 	require.Equal(t, freshTaskCreatedGoldenPayload, string(transport.msgs[0].Payload))
 }
+
+func TestPublishOutboxEvent_MatchesLegacyPublishTaskCreated(t *testing.T) {
+	legacy := &recordingPublisher{}
+	require.NoError(t, NewEventPublisher(legacy).PublishTaskCreated(context.Background(), sampleOutboxTask()))
+
+	event, err := NewTaskCreatedOutboxEvent(sampleOutboxTask())
+	require.NoError(t, err)
+	viaOutbox := &recordingPublisher{}
+	require.NoError(t, NewEventPublisher(viaOutbox).PublishOutboxEvent(context.Background(), event))
+
+	want, got := legacy.snapshot(), viaOutbox.snapshot()
+	require.Len(t, want, 1)
+	require.Len(t, got, 1)
+	require.Equal(t, want[0].topic, got[0].topic)
+	require.Equal(t, want[0].msg.Metadata, got[0].msg.Metadata)
+	require.Equal(t, string(want[0].msg.Payload), string(got[0].msg.Payload))
+	require.Equal(t, event.ID, got[0].msg.UUID, "the outbox id is reused as the message UUID")
+}

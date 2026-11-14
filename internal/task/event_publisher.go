@@ -3,6 +3,8 @@ package task
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -184,4 +186,58 @@ func generateUUID() string {
 
 func formatTaskID(taskID uint64) string {
 	return strconv.FormatUint(taskID, 10)
+}
+
+// ErrOutboxNoSubscribers is returned by PublishOutboxEvent when the transport
+// reports that nobody is subscribed to the destination topic yet.
+var ErrOutboxNoSubscribers = errors.New("outbox: no subscribers on topic")
+
+// subscriberAware is implemented by transports that can tell whether a topic
+// currently has subscribers (the in-memory bus). Kafka does not implement it.
+type subscriberAware interface {
+	HasSubscribers(topic string) bool
+}
+
+// outboxTopic maps an outbox event type to the topic it is published on. The
+// existing transport and topics are kept; OutboxEvent.Destination is recorded
+// for later work and does not affect routing yet.
+func outboxTopic(eventType string) (string, bool) {
+	switch eventType {
+	case OutboxEventTaskCreated:
+		return "task.created", true
+	default:
+		return "", false
+	}
+}
+
+// PublishOutboxEvent publishes a stored outbox event on the existing
+// transport. The message UUID is the outbox event id, so a re-publish after a
+// crash carries the same UUID. Delivery is at-least-once; consumers do not
+// dedupe on the UUID yet.
+func (ep *Publisher) PublishOutboxEvent(_ context.Context, event OutboxEvent) error {
+	if ep == nil || ep.publisher == nil {
+		return errors.New("outbox: no message publisher configured")
+	}
+
+	topic, ok := outboxTopic(event.EventType)
+	if !ok {
+		return fmt.Errorf("outbox: unknown event type %q", event.EventType)
+	}
+
+	// The in-memory bus drops messages for topics without subscribers. Report
+	// that instead, so the caller keeps the event unsent and retries.
+	if sa, ok := ep.publisher.(subscriberAware); ok && !sa.HasSubscribers(topic) {
+		return fmt.Errorf("%w: %s", ErrOutboxNoSubscribers, topic)
+	}
+
+	msg := &message.Message{
+		UUID:    event.ID,
+		Payload: event.Payload,
+		Metadata: message.Metadata{
+			"eventType": event.EventType,
+			"taskID":    formatTaskID(event.AggregateID),
+		},
+	}
+
+	return ep.publisher.Publish(topic, msg)
 }
