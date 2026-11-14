@@ -301,7 +301,12 @@ func runMigrations(pool *sqlitex.Pool) error {
         last_accessed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         expiration_days INTEGER DEFAULT 30
     );`, nil)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Transactional outbox for task events (table task_outbox).
+	return tasksqlite.EnsureOutboxSchema(conn)
 }
 
 func splitCSV(value string) []string {
