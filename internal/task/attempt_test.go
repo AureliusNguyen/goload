@@ -294,6 +294,12 @@ func TestAttemptState_Complete_RetryRejectsOtherGenerationOrResult(t *testing.T)
 	otherKey.StorageKey = "42/2/resolved-0011223344556677.bin"
 	otherChecksum := attemptResultFixture()
 	otherChecksum.Checksum = &ChecksumInfo{ChecksumType: "md5", ChecksumValue: "different"}
+	noChecksum := attemptResultFixture()
+	noChecksum.Checksum = nil
+	noName := attemptResultFixture()
+	noName.FileName = ""
+	otherName := attemptResultFixture()
+	otherName.FileName = "other.bin"
 
 	for name, tc := range map[string]struct {
 		generation uint64
@@ -302,6 +308,9 @@ func TestAttemptState_Complete_RetryRejectsOtherGenerationOrResult(t *testing.T)
 		"a different generation":  {generation: 2, result: attemptResultFixture()},
 		"a different storage key": {generation: 1, result: otherKey},
 		"a different checksum":    {generation: 1, result: otherChecksum},
+		"an omitted checksum":     {generation: 1, result: noChecksum},
+		"an omitted file name":    {generation: 1, result: noName},
+		"a different file name":   {generation: 1, result: otherName},
 	} {
 		t.Run(name, func(t *testing.T) {
 			st := ownedState(StatusStoring)

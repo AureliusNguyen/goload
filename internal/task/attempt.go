@@ -228,16 +228,28 @@ func (st *AttemptState) renew(
 	return nil
 }
 
-// matchesResult reports whether result is the result this completed task
-// already stores.
+// matchesResult reports whether result is exactly the result this completed
+// task already stores. A faithful lost-response retry resends the identical
+// result, so the comparison is strict: an omitted or changed FileName or
+// Checksum is a different result and does not match.
+//
+// FileSize and ContentType are intentionally not compared. ContentType is not
+// persisted on the task row, and FileSize is only stored as total_bytes, which
+// is unreliable as an idempotency key (a faithful FileSize==0 retry would be
+// falsely rejected). A real change to the bytes changes the Checksum, which is
+// compared. Comparing the full result identity is deferred to PR2b, where the
+// result is fully persisted.
 func (st *AttemptState) matchesResult(result AttemptResult) bool {
 	if st.StoragePath != result.StorageKey || st.StorageType != result.StorageType {
 		return false
 	}
-	if result.FileName != "" && st.FileName != result.FileName {
+	if st.FileName != result.FileName {
 		return false
 	}
-	if result.Checksum != nil && (st.Checksum == nil || *st.Checksum != *result.Checksum) {
+	if (st.Checksum == nil) != (result.Checksum == nil) {
+		return false
+	}
+	if st.Checksum != nil && *st.Checksum != *result.Checksum {
 		return false
 	}
 	return true
