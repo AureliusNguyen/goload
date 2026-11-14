@@ -26,37 +26,6 @@ func NewEventPublisher(publisher message.Publisher) *Publisher {
 	}
 }
 
-// PublishTaskCreated publishes a task created event
-func (ep *Publisher) PublishTaskCreated(ctx context.Context, task *Task) error {
-	event := events.TaskCreatedEvent{
-		TaskID:          task.ID,
-		OfAccountID:     task.OfAccountID,
-		FileName:        task.FileName,
-		SourceURL:       task.SourceURL,
-		SourceType:      string(task.SourceType),
-		SourceAuth:      convertAuthConfig(task.SourceAuth),
-		DownloadOptions: convertDownloadOptions(task.DownloadOptions),
-		Metadata:        task.Metadata,
-		CreatedAt:       task.CreatedAt,
-	}
-
-	payload, err := json.Marshal(event)
-	if err != nil {
-		return err
-	}
-
-	msg := &message.Message{
-		UUID:    generateUUID(),
-		Payload: payload,
-		Metadata: message.Metadata{
-			"eventType": "TaskCreated",
-			"taskID":    formatTaskID(task.ID),
-		},
-	}
-
-	return ep.publisher.Publish("task.created", msg)
-}
-
 // PublishTaskStatusUpdated publishes a task status update event
 func (ep *Publisher) PublishTaskStatusUpdated(ctx context.Context, taskID uint64, status TaskStatus) error {
 	event := events.TaskStatusUpdatedEvent{

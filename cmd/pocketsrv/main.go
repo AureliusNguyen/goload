@@ -113,6 +113,7 @@ func main() {
 	authStore := authsqlite.New(pool)
 	taskRepo := tasksqlite.NewTaskRepo(pool)
 	tx := tasksqlite.NewTxManager(pool)
+	outboxRepo := tasksqlite.NewOutboxRepo(pool)
 
 	var tokenManager auth.TokenManager
 	{
@@ -149,12 +150,15 @@ func main() {
 	authMiddleware := apigateway.NewAuthMiddleware(authSvc)
 
 	taskPub := task.NewEventPublisher(pub)
+	// Outbox relay: publishes the TaskCreated rows that CreateTask/RetryTask
+	// write in the task transaction, on the same in-memory bus as before.
+	outboxRelay := task.NewOutboxRelay(outboxRepo, taskPub, task.WithOutboxRelayLogger(logger))
 	secret := []byte(cfg.TokenHMACSecret)
 	tokenStore := task.NewTokenStore(
 		inmemcache.New[string, storage.TokenMetadata](5*time.Minute),
 		secret,
 	)
-	taskSvc := task.NewService(taskRepo, *taskPub, tx,
+	taskSvc := task.NewService(taskRepo, *taskPub, tx, outboxRepo,
 		task.WithTokenStore(tokenStore),
 		task.WithTaskSourceStore(storageBackend),
 		task.WithTaskSourcePresigner(storageBackend),
@@ -235,6 +239,15 @@ func main() {
 	}, func(error) {
 		b.Close()
 	})
+
+	{
+		relayCtx, cancelRelay := context.WithCancel(ctx)
+		g.Add(func() error {
+			return outboxRelay.Run(relayCtx)
+		}, func(error) {
+			cancelRelay()
+		})
+	}
 
 	g.Add(func() error {
 		<-ctx.Done()

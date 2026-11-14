@@ -84,6 +84,7 @@ func main() {
 	authStore := authsqlite.New(pool)
 	taskRepo := tasksqlite.NewTaskRepo(pool)
 	tx := tasksqlite.NewTxManager(pool)
+	outboxRepo := tasksqlite.NewOutboxRepo(pool)
 
 	// Password hasher
 	bcryptHasher := bcrypt.NewHasher(10)
@@ -103,8 +104,11 @@ func main() {
 
 	// Task service: use in-memory pubsub publisher
 	taskPub := task.NewEventPublisher(pub)
+	// Outbox relay: publishes the TaskCreated rows that CreateTask/RetryTask
+	// write in the task transaction, on the same in-memory bus as before.
+	outboxRelay := task.NewOutboxRelay(outboxRepo, taskPub, task.WithOutboxRelayLogger(logger))
 	tokenStore := task.NewInmemTokenStore()
-	taskSvc := task.NewService(taskRepo, *taskPub, tx,
+	taskSvc := task.NewService(taskRepo, *taskPub, tx, outboxRepo,
 		task.WithTokenStore(tokenStore),
 		// Local filesystem presigns are file:// URLs, which browsers will not
 		// open from the web UI. Use the HTTP /download token route in pocket mode.
@@ -263,6 +267,15 @@ func main() {
 	}, func(error) {
 		b.Close()
 	})
+
+	{
+		relayCtx, cancelRelay := context.WithCancel(ctx)
+		g.Add(func() error {
+			return outboxRelay.Run(relayCtx)
+		}, func(error) {
+			cancelRelay()
+		})
+	}
 
 	g.Add(func() error {
 		<-ctx.Done()

@@ -78,6 +78,9 @@ type service struct {
 	repo Repository
 	pub  Publisher
 	tx   TxManager
+	// outbox stores events written in the same transaction as task rows; the
+	// outbox relay publishes them after commit.
+	outbox OutboxRepository
 	// optional presigner for storage backends that support presigning
 	presigner storage.Presigner
 	// optional storage/presigner for pre-processing large task source payloads (e.g. uploaded .torrent files)
@@ -164,11 +167,18 @@ func (m *inmemTokenStore) ConsumeToken(ctx context.Context, token string) (*stor
 	return &meta, nil
 }
 
-func NewService(repo Repository, pub Publisher, tx TxManager, opts ...ServiceOption) Service {
+func NewService(
+	repo Repository,
+	pub Publisher,
+	tx TxManager,
+	outbox OutboxRepository,
+	opts ...ServiceOption,
+) Service {
 	s := &service{
 		repo:   repo,
 		pub:    pub,
 		tx:     tx,
+		outbox: outbox,
 		logger: log.NewNopLogger(),
 	}
 	for _, o := range opts {
@@ -313,12 +323,13 @@ func (s *service) CreateTask(ctx context.Context, param *CreateTaskParam) (*Task
 			}
 		}
 
-		// Publish TaskCreated event inside the same transaction. If publishing fails
-		// the transaction should be rolled back by returning an error here.
-		if err := s.pub.PublishTaskCreated(ctx, createdTask); err != nil {
+		// Record the TaskCreated event in the outbox inside the same transaction.
+		// The outbox relay publishes it after commit, so the task row and its
+		// event are stored atomically and no broker call happens in the transaction.
+		if err := s.enqueueTaskCreated(ctx, createdTask); err != nil {
 			return &errors.Error{
 				Code:    errors.ErrCodeInternal,
-				Message: "failed to publish task created event",
+				Message: "failed to enqueue task created event",
 				Cause:   err,
 			}
 		}
@@ -329,6 +340,16 @@ func (s *service) CreateTask(ctx context.Context, param *CreateTaskParam) (*Task
 	}
 
 	return createdTask, nil
+}
+
+// enqueueTaskCreated writes the TaskCreated outbox row for t on the
+// transaction carried by ctx. Call it only inside s.tx.DoInTx.
+func (s *service) enqueueTaskCreated(ctx context.Context, t *Task) error {
+	event, err := NewTaskCreatedOutboxEvent(t)
+	if err != nil {
+		return err
+	}
+	return s.outbox.InsertUnsent(ctx, event)
 }
 
 func (s *service) storeTaskSourceTorrentDataURL(
@@ -646,13 +667,14 @@ func (s *service) RetryTask(ctx context.Context, taskID uint64) error {
 			}
 		}
 
-		// Publish TaskCreated so the download worker re-picks the task.
+		// Record a TaskCreated outbox row in the same transaction so the download
+		// worker re-picks the task once the relay publishes it.
 		// PublishTaskStatusUpdated is NOT consumed by the download service;
 		// only "task.created" events trigger execution.
-		if err := s.pub.PublishTaskCreated(ctx, task); err != nil {
+		if err := s.enqueueTaskCreated(ctx, task); err != nil {
 			return &errors.Error{
 				Code:    errors.ErrCodeInternal,
-				Message: "failed to publish task created event for retry",
+				Message: "failed to enqueue task created event for retry",
 				Cause:   err,
 			}
 		}

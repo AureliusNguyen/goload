@@ -73,9 +73,10 @@ func main() {
 		}
 	}
 
-	// repo and tx manager
+	// repo, tx manager and transactional outbox
 	repo := taskmysql.NewTaskRepo(db)
 	tx := taskmysql.NewTxManager(db)
+	outboxRepo := taskmysql.NewOutboxRepo(db)
 
 	// messaging publisher (kafka) if configured
 	var pub message.Publisher
@@ -98,6 +99,16 @@ func main() {
 
 	// event publisher wrapper
 	dep := taskpkg.NewEventPublisher(pub)
+
+	// Outbox relay: publishes the TaskCreated rows that CreateTask/RetryTask
+	// write in the task transaction, on the same Kafka topic as before.
+	var outboxRelay *taskpkg.OutboxRelay
+	if pub != nil {
+		outboxRelay = taskpkg.NewOutboxRelay(outboxRepo, dep, taskpkg.WithOutboxRelayLogger(logger))
+	} else {
+		level.Warn(logger).
+			Log("msg", "KAFKA_BROKERS not set: outbox relay disabled, TaskCreated events stay unsent")
+	}
 
 	// Optional: presigner (MinIO) and token store (Redis) for GenerateDownloadURL
 	var svcOpts []taskpkg.ServiceOption
@@ -186,7 +197,7 @@ func main() {
 		svcOpts = append(svcOpts, taskpkg.WithTokenStore(ts))
 	}
 
-	svc := taskpkg.NewService(repo, *dep, tx, append(svcOpts, taskpkg.WithLogger(logger))...)
+	svc := taskpkg.NewService(repo, *dep, tx, outboxRepo, append(svcOpts, taskpkg.WithLogger(logger))...)
 
 	endpointSet := taskendpoint.New(svc)
 
@@ -254,6 +265,16 @@ func main() {
 		g.Add(func() error {
 			return taskEventConsumer.Start(ctx)
 		}, func(error) {
+		})
+	}
+
+	// Start the outbox relay when a transport is configured
+	if outboxRelay != nil {
+		relayCtx, cancelRelay := context.WithCancel(ctx)
+		g.Add(func() error {
+			return outboxRelay.Run(relayCtx)
+		}, func(error) {
+			cancelRelay()
 		})
 	}
 
