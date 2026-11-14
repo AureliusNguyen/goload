@@ -161,10 +161,13 @@ func formatTaskID(taskID uint64) string {
 // reports that nobody is subscribed to the destination topic yet.
 var ErrOutboxNoSubscribers = errors.New("outbox: no subscribers on topic")
 
-// subscriberAware is implemented by transports that can tell whether a topic
-// currently has subscribers (the in-memory bus). Kafka does not implement it.
-type subscriberAware interface {
-	HasSubscribers(topic string) bool
+// subscriberRequiringPublisher is implemented by a transport that publishes
+// only when a subscriber exists and reports the absence atomically (the
+// in-memory bus). Its only error means "no subscriber, message not
+// delivered". Kafka does not implement it: it retains messages without a
+// live consumer, so no check is needed.
+type subscriberRequiringPublisher interface {
+	PublishRequiringSubscriber(topic string, msgs ...*message.Message) error
 }
 
 // outboxTopic maps an outbox event type to the topic it is published on. The
@@ -193,12 +196,6 @@ func (ep *Publisher) PublishOutboxEvent(_ context.Context, event OutboxEvent) er
 		return fmt.Errorf("outbox: unknown event type %q", event.EventType)
 	}
 
-	// The in-memory bus drops messages for topics without subscribers. Report
-	// that instead, so the caller keeps the event unsent and retries.
-	if sa, ok := ep.publisher.(subscriberAware); ok && !sa.HasSubscribers(topic) {
-		return fmt.Errorf("%w: %s", ErrOutboxNoSubscribers, topic)
-	}
-
 	msg := &message.Message{
 		UUID:    event.ID,
 		Payload: event.Payload,
@@ -208,5 +205,12 @@ func (ep *Publisher) PublishOutboxEvent(_ context.Context, event OutboxEvent) er
 		},
 	}
 
+	if rp, ok := ep.publisher.(subscriberRequiringPublisher); ok {
+		if err := rp.PublishRequiringSubscriber(topic, msg); err != nil {
+			// The only error this returns is "no subscriber": keep the row unsent.
+			return fmt.Errorf("%w: %s", ErrOutboxNoSubscribers, topic)
+		}
+		return nil
+	}
 	return ep.publisher.Publish(topic, msg)
 }

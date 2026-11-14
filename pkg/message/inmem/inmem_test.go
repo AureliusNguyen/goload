@@ -1,7 +1,7 @@
 package inmem
 
 import (
-	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -77,23 +77,26 @@ func TestPublishSubscribe_NackRedeliver(t *testing.T) {
 	}
 }
 
-func TestHasSubscribers(t *testing.T) {
+func TestPublishRequiringSubscriber(t *testing.T) {
 	pub, sub := NewPublisherAndSubscriber(log.NewNopLogger())
 
-	assert.False(t, pub.HasSubscribers("topic3"))
+	err := pub.PublishRequiringSubscriber("topic3", message.NewMessage("3", []byte("x")))
+	assert.True(t, errors.Is(err, ErrNoSubscribers))
 
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	if _, err := sub.Subscribe(ctx, "topic3"); err != nil {
+	ch, err := sub.Subscribe(t.Context(), "topic3")
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	assert.True(t, pub.HasSubscribers("topic3"))
-	assert.False(t, pub.HasSubscribers("other-topic"))
+	if err := pub.PublishRequiringSubscriber("topic3", message.NewMessage("3", []byte("x"))); err != nil {
+		t.Fatal(err)
+	}
 
-	// The subscription is removed asynchronously once its context is done.
-	cancel()
-	assert.Eventually(t, func() bool {
-		return !pub.HasSubscribers("topic3")
-	}, time.Second, 5*time.Millisecond)
+	select {
+	case m := <-ch:
+		assert.Equal(t, "3", m.UUID)
+		m.Ack()
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for message")
+	}
 }

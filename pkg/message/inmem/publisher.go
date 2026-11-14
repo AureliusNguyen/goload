@@ -2,6 +2,7 @@ package inmem
 
 import (
 	"context"
+	"errors"
 
 	"github.com/go-kit/log/level"
 
@@ -16,10 +17,32 @@ func NewPublisher(b *broker) *Publisher {
 	return &Publisher{broker: b}
 }
 
+// ErrNoSubscribers is returned by PublishRequiringSubscriber when the topic has
+// no subscriber in the snapshot taken for that call.
+var ErrNoSubscribers = errors.New("inmem: no subscribers on topic")
+
 func (p *Publisher) Publish(topic string, msgs ...*message.Message) error {
 	subs := p.broker.getSubs(topic)
 	_ = level.Debug(p.broker.logger).
 		Log("msg", "inmem.publish", "topic", topic, "messages", len(msgs), "subscribers", len(subs))
+	p.deliver(subs, topic, msgs...)
+	return nil
+}
+
+// PublishRequiringSubscriber publishes like Publish but takes a single
+// subscriber snapshot and returns ErrNoSubscribers when that snapshot is
+// empty, so there is no window between the subscriber check and delivery.
+// Callers that must not treat a dropped message as delivered use this.
+func (p *Publisher) PublishRequiringSubscriber(topic string, msgs ...*message.Message) error {
+	subs := p.broker.getSubs(topic)
+	if len(subs) == 0 {
+		return ErrNoSubscribers
+	}
+	p.deliver(subs, topic, msgs...)
+	return nil
+}
+
+func (p *Publisher) deliver(subs []*subscription, topic string, msgs ...*message.Message) {
 	for mi, msg := range msgs {
 		for si, s := range subs {
 			// deliver a copy per subscriber
@@ -68,15 +91,6 @@ func (p *Publisher) Publish(topic string, msgs ...*message.Message) error {
 			}(s.ch, m, s.ctx, topic, mi, si)
 		}
 	}
-	return nil
 }
 
 func (p *Publisher) Close() error { return nil }
-
-// HasSubscribers reports whether at least one subscriber is registered for
-// topic right now. Publish silently drops messages for a topic nobody
-// subscribes to, so a caller that must not lose a message checks this first
-// and retries later.
-func (p *Publisher) HasSubscribers(topic string) bool {
-	return len(p.broker.getSubs(topic)) > 0
-}
