@@ -341,3 +341,119 @@ func TestPausableProgressReader_ConcurrentPauseAndRead(t *testing.T) {
 	reader.Resume()
 	<-done
 }
+
+func TestGenerateStorageKeyNamespacesByGeneration(t *testing.T) {
+	svc := &service{}
+	req := TaskRequest{TaskID: 9, SourceURL: "https://example.com/files/file.txt"}
+
+	legacy := svc.generateStorageKey(req, "file.txt")
+	req.Generation = 1
+	first := svc.generateStorageKey(req, "file.txt")
+	req.Generation = 2
+	second := svc.generateStorageKey(req, "file.txt")
+
+	if !strings.HasPrefix(legacy, "9/file-") {
+		t.Fatalf("an unclaimed request must keep the legacy key layout, got %q", legacy)
+	}
+	if !strings.HasPrefix(first, "9/1/file-") {
+		t.Fatalf("generation 1 key must be namespaced by generation, got %q", first)
+	}
+	if !strings.HasPrefix(second, "9/2/file-") {
+		t.Fatalf("generation 2 key must be namespaced by generation, got %q", second)
+	}
+	if filepath.Ext(second) != ".txt" {
+		t.Fatalf("expected key to preserve .txt extension, got %q", second)
+	}
+	if strings.TrimPrefix(first, "9/1/") != strings.TrimPrefix(legacy, "9/") {
+		t.Fatalf("only the generation segment may differ: %q vs %q", first, legacy)
+	}
+}
+
+// keyedStorage records stored objects by key. failNextStore makes the next
+// Store fail after it has consumed the reader.
+type keyedStorage struct {
+	fakeStorage
+	mu       sync.Mutex
+	objects  map[string]bool
+	deleted  []string
+	failNext bool
+}
+
+func (s *keyedStorage) Store(ctx context.Context, key string, reader io.Reader, metadata *storage.FileMetadata) error {
+	if _, err := io.Copy(io.Discard, reader); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failNext {
+		s.failNext = false
+		return errors.New("disk full")
+	}
+	s.objects[key] = true
+	return nil
+}
+
+func (s *keyedStorage) Delete(ctx context.Context, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deleted = append(s.deleted, key)
+	delete(s.objects, key)
+	return nil
+}
+
+func (s *keyedStorage) failNextStore() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failNext = true
+}
+
+func (s *keyedStorage) has(key string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.objects[key]
+}
+
+func (s *keyedStorage) deletedKeys() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.deleted...)
+}
+
+func TestExecuteTask_StaleAttemptCleanupKeepsWinnersObject(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := &keyedStorage{objects: map[string]bool{}}
+		svc := NewService(store, &fakePublisher{})
+		svc.RegisterDownloader("HTTP", &fakeDownloader{})
+		base := TaskRequest{TaskID: 9, SourceURL: "https://example.com/files/file.txt", SourceType: "HTTP"}
+
+		// The replacement attempt (generation 2) stores its object.
+		winner := base
+		winner.Generation = 2
+		if err := svc.ExecuteTask(t.Context(), winner); err != nil {
+			t.Fatalf("ExecuteTask(winner) error = %v", err)
+		}
+		synctest.Wait()
+		winnerKey := svc.generateStorageKey(winner, "file.txt")
+		if !store.has(winnerKey) {
+			t.Fatalf("winner object %q was not stored", winnerKey)
+		}
+
+		// The stale attempt (generation 1) then fails while storing and
+		// cleans up after itself.
+		stale := base
+		stale.Generation = 1
+		staleKey := svc.generateStorageKey(stale, "file.txt")
+		store.failNextStore()
+		if err := svc.ExecuteTask(t.Context(), stale); err != nil {
+			t.Fatalf("ExecuteTask(stale) error = %v", err)
+		}
+		synctest.Wait()
+
+		if got := store.deletedKeys(); len(got) != 1 || got[0] != staleKey {
+			t.Fatalf("deleted keys = %v, want only the stale attempt's own key %q", got, staleKey)
+		}
+		if !store.has(winnerKey) {
+			t.Fatal("the stale attempt's cleanup deleted the winner's object")
+		}
+	})
+}

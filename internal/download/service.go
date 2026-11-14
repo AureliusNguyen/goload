@@ -310,6 +310,9 @@ func (s *service) executeDownload(execution *taskExecution, downloader Downloade
 		ContentType:  metadata.ContentType,
 		LastModified: time.Now(),
 	}); err != nil {
+		// storageKey belongs to this attempt alone (it carries the attempt
+		// generation), so this cleanup cannot remove an object stored by
+		// another attempt of the same task.
 		_ = s.storage.Delete(context.Background(), storageKey)
 		return &errors.Error{Code: errors.ErrCodeInternal, Message: "failed to store file", Cause: err}
 	}
@@ -487,6 +490,12 @@ func (s *service) generateStorageKey(req TaskRequest, resolvedFileName string) s
 
 	finalName := fmt.Sprintf("%s-%x%s", name, urlHash[:8], ext)
 
+	// A claimed attempt writes under its own generation prefix, so two
+	// attempts of one task never share a key and an attempt's cleanup can
+	// only remove its own object. Generation 0 is the unclaimed legacy path.
+	if req.Generation > 0 {
+		return fmt.Sprintf("%d/%d/%s", req.TaskID, req.Generation, finalName)
+	}
 	return fmt.Sprintf("%d/%s", req.TaskID, finalName)
 }
 

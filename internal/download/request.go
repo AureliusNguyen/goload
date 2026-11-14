@@ -14,6 +14,10 @@ type TaskRequest struct {
 	Metadata        map[string]any
 	Checksum        *ChecksumInfo
 	CreatedAt       time.Time
+	// Generation is the attempt generation returned by the task service's
+	// ClaimTask (1 for the first claim). It namespaces the storage key. Zero
+	// means the task was not claimed: the legacy event-driven path.
+	Generation uint64
 }
 
 // AuthConfig is internal auth config for the download service.
