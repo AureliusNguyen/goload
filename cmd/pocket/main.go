@@ -415,7 +415,13 @@ func runMigrations(pool *sqlitex.Pool) error {
 	}
 
 	// Transactional outbox for task events (table task_outbox).
-	return tasksqlite.EnsureOutboxSchema(conn)
+	err = tasksqlite.EnsureOutboxSchema(conn)
+	if err != nil {
+		return err
+	}
+
+	// Task ownership columns: owner, lease, generation and retry state.
+	return tasksqlite.EnsureOwnershipSchema(conn)
 }
 
 func splitCSV(value string) []string {

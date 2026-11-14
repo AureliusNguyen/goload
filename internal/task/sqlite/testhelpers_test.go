@@ -41,7 +41,7 @@ const tasksTableDDL = `CREATE TABLE IF NOT EXISTS tasks (
 );`
 
 // newTestPool opens a throwaway on-disk SQLite pool that has the pocket
-// tasks table and the task_outbox table.
+// tasks table (with the ownership columns) and the task_outbox table.
 func newTestPool(t *testing.T) *sqlitex.Pool {
 	t.Helper()
 
@@ -55,6 +55,25 @@ func newTestPool(t *testing.T) *sqlitex.Pool {
 
 	require.NoError(t, sqlitex.ExecuteTransient(conn, tasksTableDDL, nil))
 	require.NoError(t, EnsureOutboxSchema(conn))
+	require.NoError(t, EnsureOwnershipSchema(conn))
+
+	return pool
+}
+
+// newBarePool opens a pool that has only the tasks table as it existed
+// before the ownership columns: the upgrade path of an existing database.
+func newBarePool(t *testing.T) *sqlitex.Pool {
+	t.Helper()
+
+	pool, err := sqlitex.Open(filepath.Join(t.TempDir(), "goload_bare.db"), 0, 2)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pool.Close() })
+
+	conn := pool.Get(context.Background())
+	require.NotNil(t, conn)
+	defer pool.Put(conn)
+
+	require.NoError(t, sqlitex.ExecuteTransient(conn, tasksTableDDL, nil))
 
 	return pool
 }
