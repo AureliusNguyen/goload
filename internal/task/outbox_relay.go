@@ -20,7 +20,7 @@ const (
 	outboxMarkSentTimeout = 5 * time.Second
 )
 
-// OutboxRelay polls the outbox and publishes unsent events on the existing
+// OutboxRelay polls the outbox, sweeps all unsent events each pass and publishes them on the existing
 // transport, then marks them sent. Delivery is at-least-once: when the process
 // dies or MarkSent fails after a successful publish, the same event is
 // published again with the same message UUID. Consumers do not dedupe yet;
@@ -98,34 +98,52 @@ func (r *OutboxRelay) Run(ctx context.Context) error {
 	}
 }
 
-// RunOnce performs a single pass: fetch up to the batch size of unsent events,
-// publish each one and mark it sent. It returns how many events were published
-// and marked, and the first error encountered. A failed event is skipped: it
-// stays unsent and is retried on the next pass, so one bad event cannot block
-// the events behind it.
+// RunOnce performs a single full sweep: it pages through every unsent event
+// (batchSize rows per fetch, using a cursor), publishes each one and marks it
+// sent. It returns how many events were published and marked, and the first
+// error encountered. A failed event is skipped: the cursor advances past it,
+// so it cannot starve the events behind it this pass; it stays unsent and is
+// retried on the next pass, which starts again from the oldest row.
 func (r *OutboxRelay) RunOnce(ctx context.Context) (int, error) {
-	batch, err := r.repo.FetchUnsent(ctx, r.batchSize)
-	if err != nil {
-		return 0, fmt.Errorf("fetch unsent outbox events: %w", err)
-	}
-
 	var (
 		sent     int
 		firstErr error
+		cursor   OutboxCursor
 	)
-	for _, event := range batch {
+	for {
 		if err := ctx.Err(); err != nil {
 			return sent, err
 		}
-		if err := r.relayOne(ctx, event); err != nil {
+		batch, err := r.repo.FetchUnsent(ctx, cursor, r.batchSize)
+		if err != nil {
 			if firstErr == nil {
-				firstErr = err
+				firstErr = fmt.Errorf("fetch unsent outbox events: %w", err)
 			}
-			continue
+			return sent, firstErr
 		}
-		sent++
+		if len(batch) == 0 {
+			return sent, firstErr
+		}
+		for _, event := range batch {
+			if err := ctx.Err(); err != nil {
+				return sent, err
+			}
+			if err := r.relayOne(ctx, event); err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+			} else {
+				sent++
+			}
+			// Advance past this event (success or failure) so a stuck row
+			// does not block the rows behind it this pass; failures are
+			// retried on the next pass (the cursor resets each pass).
+			cursor = OutboxCursor{CreatedAt: event.CreatedAt, ID: event.ID}
+		}
+		if len(batch) < r.batchSize {
+			return sent, firstErr
+		}
 	}
-	return sent, firstErr
 }
 
 func (r *OutboxRelay) relayOne(ctx context.Context, event OutboxEvent) error {

@@ -228,7 +228,7 @@ func TestOutboxRepo_FetchUnsent_MapsRowsAndPassesLimit(t *testing.T) {
 		{"evt-2", int64(43), "dispatch", "TaskCreated", []byte(`{"task_id":43}`), created.Add(time.Second)},
 	}
 
-	events, err := NewOutboxRepo(db).FetchUnsent(context.Background(), 10)
+	events, err := NewOutboxRepo(db).FetchUnsent(context.Background(), task.OutboxCursor{}, 10)
 	require.NoError(t, err)
 	require.Len(t, events, 2)
 	require.Equal(t, "evt-1", events[0].ID)
@@ -256,7 +256,7 @@ func TestOutboxRepo_FetchUnsent_NonPositiveLimitSkipsQuery(t *testing.T) {
 
 	// MySQL rejects a negative LIMIT; the repo answers without asking.
 	for _, limit := range []int{0, -1} {
-		events, err := repo.FetchUnsent(context.Background(), limit)
+		events, err := repo.FetchUnsent(context.Background(), task.OutboxCursor{}, limit)
 		require.NoError(t, err)
 		require.Empty(t, events)
 	}
@@ -306,4 +306,25 @@ func TestMigration0003_TaskOutboxIsIdempotentAndComplete(t *testing.T) {
 	} {
 		require.Contains(t, ddl, fragment)
 	}
+}
+
+func TestOutboxRepo_FetchUnsent_CursorUsesKeysetPredicate(t *testing.T) {
+	fake, db := openFakeDB(t)
+	created := time.Date(2026, 1, 2, 3, 4, 5, 123456000, time.UTC)
+	fake.rows = [][]driver.Value{
+		{"evt-3", int64(43), "dispatch", "TaskCreated", []byte(`{}`), created.Add(time.Second)},
+	}
+
+	cursor := task.OutboxCursor{CreatedAt: created, ID: "evt-2"}
+	events, err := NewOutboxRepo(db).FetchUnsent(context.Background(), cursor, 5)
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	require.Equal(t, "evt-3", events[0].ID)
+
+	_, calls := fake.snapshot()
+	require.Len(t, calls, 1)
+	require.Equal(t, "query", calls[0].kind)
+	require.Contains(t, calls[0].query, "(created_at > ? OR (created_at = ? AND id > ?))")
+	require.Contains(t, calls[0].query, "ORDER BY created_at ASC, id ASC")
+	require.Equal(t, []driver.Value{created, created, "evt-2", int64(5)}, calls[0].args)
 }

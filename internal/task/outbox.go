@@ -42,14 +42,22 @@ type OutboxEvent struct {
 	SentAt *time.Time
 }
 
+// OutboxCursor positions FetchUnsent. The zero value starts at the oldest row.
+type OutboxCursor struct {
+	CreatedAt time.Time
+	ID        string
+}
+
 // OutboxRepository persists outbox events next to the task rows.
 type OutboxRepository interface {
 	// InsertUnsent stores event with sent_at NULL. When ctx carries a
 	// transaction started by TxManager.DoInTx the insert joins it.
 	InsertUnsent(ctx context.Context, event OutboxEvent) error
-	// FetchUnsent returns up to limit unsent events, oldest first. A limit
-	// that is zero or negative returns no events.
-	FetchUnsent(ctx context.Context, limit int) ([]OutboxEvent, error)
+	// FetchUnsent returns unsent events whose (created_at, id) is strictly
+	// greater than after (all unsent events when after is the zero value),
+	// ordered by (created_at ASC, id ASC), up to limit. A limit that is zero
+	// or negative returns no events and no error.
+	FetchUnsent(ctx context.Context, after OutboxCursor, limit int) ([]OutboxEvent, error)
 	// MarkSent sets sent_at for the event. It is a no-op for an unknown or
 	// already-sent id.
 	MarkSent(ctx context.Context, id string) error

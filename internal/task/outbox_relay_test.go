@@ -3,6 +3,7 @@ package task
 import (
 	"context"
 	"errors"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -36,20 +37,36 @@ func (o *memOutbox) InsertUnsent(_ context.Context, event OutboxEvent) error {
 	return nil
 }
 
-func (o *memOutbox) FetchUnsent(_ context.Context, limit int) ([]OutboxEvent, error) {
+func (o *memOutbox) FetchUnsent(_ context.Context, after OutboxCursor, limit int) ([]OutboxEvent, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.fetchErr != nil {
 		return nil, o.fetchErr
 	}
+	if limit <= 0 {
+		return nil, nil
+	}
 	var out []OutboxEvent
 	for _, row := range o.rows {
-		if len(out) >= limit {
-			break
+		if row.SentAt != nil {
+			continue
 		}
-		if row.SentAt == nil {
-			out = append(out, row)
+		if !after.CreatedAt.IsZero() {
+			if row.CreatedAt.Before(after.CreatedAt) ||
+				(row.CreatedAt.Equal(after.CreatedAt) && row.ID <= after.ID) {
+				continue
+			}
 		}
+		out = append(out, row)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.Before(out[j].CreatedAt)
+		}
+		return out[i].ID < out[j].ID
+	})
+	if len(out) > limit {
+		out = out[:limit]
 	}
 	return out, nil
 }
@@ -220,7 +237,7 @@ func TestOutboxRelay_RunOnce_FetchError(t *testing.T) {
 	require.Empty(t, transport.snapshot())
 }
 
-func TestOutboxRelay_RunOnce_RespectsBatchSize(t *testing.T) {
+func TestOutboxRelay_RunOnce_SweepsAllRowsInBatches(t *testing.T) {
 	outbox := seededOutbox(t,
 		outboxEventFixture("evt-1", 1),
 		outboxEventFixture("evt-2", 2),
@@ -229,14 +246,15 @@ func TestOutboxRelay_RunOnce_RespectsBatchSize(t *testing.T) {
 	transport := &recordingPublisher{}
 	relay := NewOutboxRelay(outbox, NewEventPublisher(transport), WithOutboxBatchSize(2))
 
+	// Batch size 2 pages the fetch; one pass still covers all three rows.
 	sent, err := relay.RunOnce(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, 2, sent)
+	require.Equal(t, 3, sent)
+	require.Equal(t, []string{"evt-1", "evt-2", "evt-3"}, transport.uuids())
 
 	sent, err = relay.RunOnce(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, 1, sent)
-	require.Equal(t, []string{"evt-1", "evt-2", "evt-3"}, transport.uuids())
+	require.Zero(t, sent)
 }
 
 func TestOutboxRelay_Run_FirstPassIsImmediate(t *testing.T) {
@@ -313,4 +331,28 @@ func TestOutboxRelay_Inmem_WaitsForSubscriber(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for task.created message")
 	}
+}
+
+func TestOutboxRelay_RunOnce_StuckRowsDoNotStarveTheTail(t *testing.T) {
+	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	withTime := func(id string, taskID uint64, offset time.Duration) OutboxEvent {
+		event := outboxEventFixture(id, taskID)
+		event.CreatedAt = base.Add(offset)
+		return event
+	}
+	outbox := seededOutbox(t,
+		withTime("evt-1", 1, 0),
+		withTime("evt-2", 2, time.Millisecond),
+		withTime("evt-3", 3, 2*time.Millisecond),
+	)
+	// The two oldest rows always fail; with batch size 2 the old relay
+	// re-fetched only those two on every pass and never reached evt-3.
+	transport := &recordingPublisher{failFirst: map[string]int{"evt-1": 1 << 30, "evt-2": 1 << 30}}
+	relay := NewOutboxRelay(outbox, NewEventPublisher(transport), WithOutboxBatchSize(2))
+
+	sent, err := relay.RunOnce(context.Background())
+	require.ErrorIs(t, err, errPublishFailed)
+	require.Equal(t, 1, sent, "the healthy tail row must be published in a single pass")
+	require.Equal(t, []string{"evt-3"}, transport.uuids())
+	require.Equal(t, []string{"evt-1", "evt-2"}, outbox.unsentIDs())
 }

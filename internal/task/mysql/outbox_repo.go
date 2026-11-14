@@ -17,6 +17,12 @@ WHERE sent_at IS NULL
 ORDER BY created_at ASC, id ASC
 LIMIT ?`
 
+const fetchUnsentOutboxAfterSQL = `SELECT id, aggregate_id, destination, event_type, payload, created_at
+FROM task_outbox
+WHERE sent_at IS NULL AND (created_at > ? OR (created_at = ? AND id > ?))
+ORDER BY created_at ASC, id ASC
+LIMIT ?`
+
 const markOutboxSentSQL = `UPDATE task_outbox SET sent_at = ? WHERE id = ? AND sent_at IS NULL`
 
 // outboxDBTX is the subset of *sql.DB and *sql.Tx the outbox repository uses.
@@ -57,13 +63,22 @@ func (r *outboxRepo) InsertUnsent(ctx context.Context, event task.OutboxEvent) e
 	return err
 }
 
-func (r *outboxRepo) FetchUnsent(ctx context.Context, limit int) ([]task.OutboxEvent, error) {
+func (r *outboxRepo) FetchUnsent(ctx context.Context, after task.OutboxCursor, limit int) ([]task.OutboxEvent, error) {
 	// MySQL rejects a negative LIMIT.
 	if limit <= 0 {
 		return nil, nil
 	}
 
-	rows, err := r.dbtx(ctx).QueryContext(ctx, fetchUnsentOutboxSQL, limit)
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if after.CreatedAt.IsZero() {
+		rows, err = r.dbtx(ctx).QueryContext(ctx, fetchUnsentOutboxSQL, limit)
+	} else {
+		rows, err = r.dbtx(ctx).QueryContext(ctx, fetchUnsentOutboxAfterSQL,
+			after.CreatedAt, after.CreatedAt, after.ID, limit)
+	}
 	if err != nil {
 		return nil, err
 	}

@@ -84,7 +84,7 @@ func TestOutboxRepo_InsertUnsentThenFetchUnsent(t *testing.T) {
 	want := newOutboxEvent("evt-1", 42, outboxTestTime())
 	require.NoError(t, repo.InsertUnsent(ctx, want))
 
-	got, err := repo.FetchUnsent(ctx, 10)
+	got, err := repo.FetchUnsent(ctx, task.OutboxCursor{}, 10)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	require.Equal(t, want.ID, got[0].ID)
@@ -106,7 +106,7 @@ func TestOutboxRepo_MarkSentRemovesFromFetchUnsent(t *testing.T) {
 
 	require.NoError(t, repo.MarkSent(ctx, "evt-1"))
 
-	got, err := repo.FetchUnsent(ctx, 10)
+	got, err := repo.FetchUnsent(ctx, task.OutboxCursor{}, 10)
 	require.NoError(t, err)
 	require.Equal(t, []string{"evt-2"}, outboxIDs(got))
 
@@ -149,28 +149,28 @@ func TestOutboxRepo_FetchUnsent_OldestFirstAndLimited(t *testing.T) {
 	require.NoError(t, repo.InsertUnsent(ctx, newOutboxEvent("evt-a", 1, base)))
 	require.NoError(t, repo.InsertUnsent(ctx, newOutboxEvent("evt-b", 2, base.Add(time.Millisecond))))
 
-	all, err := repo.FetchUnsent(ctx, 10)
+	all, err := repo.FetchUnsent(ctx, task.OutboxCursor{}, 10)
 	require.NoError(t, err)
 	require.Equal(t, []string{"evt-a", "evt-b", "evt-c"}, outboxIDs(all))
 
-	limited, err := repo.FetchUnsent(ctx, 2)
+	limited, err := repo.FetchUnsent(ctx, task.OutboxCursor{}, 2)
 	require.NoError(t, err)
 	require.Equal(t, []string{"evt-a", "evt-b"}, outboxIDs(limited))
 }
 
-func TestOutboxRepo_FetchUnsent_SameTimestampKeepsInsertionOrder(t *testing.T) {
+func TestOutboxRepo_FetchUnsent_SameTimestampOrdersByID(t *testing.T) {
 	pool := newTestPool(t)
 	repo := NewOutboxRepo(pool)
 	ctx := context.Background()
 	at := outboxTestTime()
 
-	// Same created_at: insertion order wins, not id order ("evt-y" < "evt-z").
+	// Same created_at: id order breaks the tie, not insertion order.
 	require.NoError(t, repo.InsertUnsent(ctx, newOutboxEvent("evt-z", 1, at)))
 	require.NoError(t, repo.InsertUnsent(ctx, newOutboxEvent("evt-y", 2, at)))
 
-	got, err := repo.FetchUnsent(ctx, 10)
+	got, err := repo.FetchUnsent(ctx, task.OutboxCursor{}, 10)
 	require.NoError(t, err)
-	require.Equal(t, []string{"evt-z", "evt-y"}, outboxIDs(got))
+	require.Equal(t, []string{"evt-y", "evt-z"}, outboxIDs(got))
 }
 
 func TestOutboxRepo_FetchUnsent_NonPositiveLimit(t *testing.T) {
@@ -181,7 +181,7 @@ func TestOutboxRepo_FetchUnsent_NonPositiveLimit(t *testing.T) {
 
 	// SQLite treats a negative LIMIT as "no limit"; the repo must not.
 	for _, limit := range []int{0, -1} {
-		got, err := repo.FetchUnsent(ctx, limit)
+		got, err := repo.FetchUnsent(ctx, task.OutboxCursor{}, limit)
 		require.NoError(t, err)
 		require.Empty(t, got)
 	}
@@ -195,7 +195,7 @@ func TestOutboxRepo_InsertUnsent_DuplicateIDFails(t *testing.T) {
 	require.NoError(t, repo.InsertUnsent(ctx, newOutboxEvent("evt-dup", 1, outboxTestTime())))
 	require.Error(t, repo.InsertUnsent(ctx, newOutboxEvent("evt-dup", 2, outboxTestTime())))
 
-	got, err := repo.FetchUnsent(ctx, 10)
+	got, err := repo.FetchUnsent(ctx, task.OutboxCursor{}, 10)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	require.Equal(t, uint64(1), got[0].AggregateID)
@@ -215,7 +215,7 @@ func TestOutboxRepo_LargePayloadRoundTrips(t *testing.T) {
 	event.Payload = payload
 	require.NoError(t, repo.InsertUnsent(ctx, event))
 
-	got, err := repo.FetchUnsent(ctx, 1)
+	got, err := repo.FetchUnsent(ctx, task.OutboxCursor{}, 1)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	require.True(t, bytes.Equal(payload, got[0].Payload), "payload must round-trip byte for byte")
@@ -249,7 +249,7 @@ func TestDoInTx_RollsBackTaskAndOutboxTogether(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, count, "the task row must not persist")
 
-	unsent, err := outbox.FetchUnsent(ctx, 10)
+	unsent, err := outbox.FetchUnsent(ctx, task.OutboxCursor{}, 10)
 	require.NoError(t, err)
 	require.Empty(t, unsent, "the outbox row must not persist")
 }
@@ -279,7 +279,7 @@ func TestDoInTx_CommitsTaskAndOutboxTogether(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), count)
 
-	unsent, err := outbox.FetchUnsent(ctx, 10)
+	unsent, err := outbox.FetchUnsent(ctx, task.OutboxCursor{}, 10)
 	require.NoError(t, err)
 	require.Len(t, unsent, 1)
 	require.Equal(t, createdID, unsent[0].AggregateID)
@@ -307,4 +307,34 @@ func TestDoInTx_DuplicateOutboxIDRollsBackTask(t *testing.T) {
 	count, err := repo.GetTaskCountOfAccount(ctx, 7)
 	require.NoError(t, err)
 	require.Zero(t, count, "the task row must roll back with the failed outbox insert")
+}
+
+func TestOutboxRepo_FetchUnsent_CursorPagesWithoutRepeats(t *testing.T) {
+	pool := newTestPool(t)
+	repo := NewOutboxRepo(pool)
+	ctx := context.Background()
+	base := outboxTestTime()
+
+	// Includes a created_at tie broken by id, inserted out of order.
+	require.NoError(t, repo.InsertUnsent(ctx, newOutboxEvent("evt-e", 5, base.Add(3*time.Millisecond))))
+	require.NoError(t, repo.InsertUnsent(ctx, newOutboxEvent("evt-b", 2, base.Add(time.Millisecond))))
+	require.NoError(t, repo.InsertUnsent(ctx, newOutboxEvent("evt-a", 1, base)))
+	require.NoError(t, repo.InsertUnsent(ctx, newOutboxEvent("evt-d", 4, base.Add(time.Millisecond))))
+	require.NoError(t, repo.InsertUnsent(ctx, newOutboxEvent("evt-c", 3, base.Add(2*time.Millisecond))))
+
+	var (
+		seen   []string
+		cursor task.OutboxCursor
+	)
+	for {
+		page, err := repo.FetchUnsent(ctx, cursor, 2)
+		require.NoError(t, err)
+		if len(page) == 0 {
+			break
+		}
+		seen = append(seen, outboxIDs(page)...)
+		last := page[len(page)-1]
+		cursor = task.OutboxCursor{CreatedAt: last.CreatedAt, ID: last.ID}
+	}
+	require.Equal(t, []string{"evt-a", "evt-b", "evt-d", "evt-c", "evt-e"}, seen)
 }

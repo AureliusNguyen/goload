@@ -54,23 +54,35 @@ VALUES (?, ?, ?, ?, ?, ?, NULL)`,
 	})
 }
 
-func (r *outboxRepo) FetchUnsent(ctx context.Context, limit int) ([]task.OutboxEvent, error) {
+func (r *outboxRepo) FetchUnsent(ctx context.Context, after task.OutboxCursor, limit int) ([]task.OutboxEvent, error) {
 	// SQLite reads a negative LIMIT as "no limit".
 	if limit <= 0 {
 		return nil, nil
+	}
+
+	query := `SELECT id, aggregate_id, destination, event_type, payload, created_at
+FROM task_outbox
+WHERE sent_at IS NULL
+ORDER BY created_at ASC, id ASC
+LIMIT ?`
+	args := []any{limit}
+	if !after.CreatedAt.IsZero() {
+		createdAt := after.CreatedAt.UTC().Format(outboxTimeLayout)
+		query = `SELECT id, aggregate_id, destination, event_type, payload, created_at
+FROM task_outbox
+WHERE sent_at IS NULL AND (created_at > ?1 OR (created_at = ?1 AND id > ?2))
+ORDER BY created_at ASC, id ASC
+LIMIT ?3`
+		args = []any{createdAt, after.ID, limit}
 	}
 
 	var events []task.OutboxEvent
 	err := r.withConn(ctx, func(conn *sqlite.Conn) error {
 		return sqlitex.Execute(
 			conn,
-			`SELECT id, aggregate_id, destination, event_type, payload, created_at
-FROM task_outbox
-WHERE sent_at IS NULL
-ORDER BY created_at ASC, rowid ASC
-LIMIT ?`,
+			query,
 			&sqlitex.ExecOptions{
-				Args: []any{limit},
+				Args: args,
 				ResultFunc: func(stmt *sqlite.Stmt) error {
 					event, err := scanOutboxEvent(stmt)
 					if err != nil {

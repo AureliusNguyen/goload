@@ -50,7 +50,7 @@ func TestCreateTask_CommitsOutboxRowThenRelayPublishes(t *testing.T) {
 	require.NotZero(t, created.ID)
 
 	// Committed but not published yet: the event waits in the outbox.
-	unsent, err := outbox.FetchUnsent(ctx, 10)
+	unsent, err := outbox.FetchUnsent(ctx, task.OutboxCursor{}, 10)
 	require.NoError(t, err)
 	require.Len(t, unsent, 1)
 	require.Equal(t, created.ID, unsent[0].AggregateID)
@@ -80,7 +80,7 @@ func TestCreateTask_CommitsOutboxRowThenRelayPublishes(t *testing.T) {
 		t.Fatal("timeout waiting for task.created message")
 	}
 
-	unsent, err = outbox.FetchUnsent(ctx, 10)
+	unsent, err = outbox.FetchUnsent(ctx, task.OutboxCursor{}, 10)
 	require.NoError(t, err)
 	require.Empty(t, unsent)
 }
@@ -106,7 +106,7 @@ func TestCreateTask_OutboxFailureRollsBackTaskRow(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, count, "the task row must roll back with the outbox row")
 
-	unsent, err := outbox.FetchUnsent(ctx, 10)
+	unsent, err := outbox.FetchUnsent(ctx, task.OutboxCursor{}, 10)
 	require.NoError(t, err)
 	require.Empty(t, unsent)
 }
@@ -129,7 +129,7 @@ func TestRetryTask_CommitsPendingStatusAndOutboxRow(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, task.StatusPending, got.Status)
 
-	unsent, err := outbox.FetchUnsent(ctx, 10)
+	unsent, err := outbox.FetchUnsent(ctx, task.OutboxCursor{}, 10)
 	require.NoError(t, err)
 	require.Len(t, unsent, 1)
 	require.Equal(t, created.ID, unsent[0].AggregateID)
@@ -158,7 +158,7 @@ func TestRetryTask_OutboxFailureKeepsTaskFailed(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, task.StatusFailed, got.Status, "the status update must roll back with the outbox row")
 
-	unsent, err := outbox.FetchUnsent(ctx, 10)
+	unsent, err := outbox.FetchUnsent(ctx, task.OutboxCursor{}, 10)
 	require.NoError(t, err)
 	require.Empty(t, unsent)
 }
