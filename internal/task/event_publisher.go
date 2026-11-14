@@ -32,8 +32,8 @@ func (ep *Publisher) PublishTaskCreated(ctx context.Context, task *Task) error {
 		FileName:        task.FileName,
 		SourceURL:       task.SourceURL,
 		SourceType:      string(task.SourceType),
-		SourceAuth:      ep.convertAuthConfig(task.SourceAuth),
-		DownloadOptions: ep.convertDownloadOptions(task.DownloadOptions),
+		SourceAuth:      convertAuthConfig(task.SourceAuth),
+		DownloadOptions: convertDownloadOptions(task.DownloadOptions),
 		Metadata:        task.Metadata,
 		CreatedAt:       task.CreatedAt,
 	}
@@ -152,8 +152,8 @@ func (ep *Publisher) PublishTaskCancelled(ctx context.Context, taskID uint64) er
 	return ep.publisher.Publish("task.cancelled", msg)
 }
 
-// Helper methods for converting task types to event types
-func (ep *Publisher) convertAuthConfig(auth *AuthConfig) *events.AuthConfig {
+// Helpers for converting task types to event types
+func convertAuthConfig(auth *AuthConfig) *events.AuthConfig {
 	if auth == nil {
 		return nil
 	}
@@ -166,7 +166,7 @@ func (ep *Publisher) convertAuthConfig(auth *AuthConfig) *events.AuthConfig {
 	}
 }
 
-func (ep *Publisher) convertDownloadOptions(opts *DownloadOptions) *events.DownloadOptions {
+func convertDownloadOptions(opts *DownloadOptions) *events.DownloadOptions {
 	if opts == nil {
 		return nil
 	}
