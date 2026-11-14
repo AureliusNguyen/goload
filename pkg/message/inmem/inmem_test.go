@@ -1,6 +1,7 @@
 package inmem
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -74,4 +75,25 @@ func TestPublishSubscribe_NackRedeliver(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for redelivered message")
 	}
+}
+
+func TestHasSubscribers(t *testing.T) {
+	pub, sub := NewPublisherAndSubscriber(log.NewNopLogger())
+
+	assert.False(t, pub.HasSubscribers("topic3"))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	if _, err := sub.Subscribe(ctx, "topic3"); err != nil {
+		t.Fatal(err)
+	}
+
+	assert.True(t, pub.HasSubscribers("topic3"))
+	assert.False(t, pub.HasSubscribers("other-topic"))
+
+	// The subscription is removed asynchronously once its context is done.
+	cancel()
+	assert.Eventually(t, func() bool {
+		return !pub.HasSubscribers("topic3")
+	}, time.Second, 5*time.Millisecond)
 }

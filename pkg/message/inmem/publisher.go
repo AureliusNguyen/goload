@@ -72,3 +72,11 @@ func (p *Publisher) Publish(topic string, msgs ...*message.Message) error {
 }
 
 func (p *Publisher) Close() error { return nil }
+
+// HasSubscribers reports whether at least one subscriber is registered for
+// topic right now. Publish silently drops messages for a topic nobody
+// subscribes to, so a caller that must not lose a message checks this first
+// and retries later.
+func (p *Publisher) HasSubscribers(topic string) bool {
+	return len(p.broker.getSubs(topic)) > 0
+}
