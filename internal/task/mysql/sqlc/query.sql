@@ -76,3 +76,26 @@ WHERE of_account_id = ?;
 DELETE
 FROM tasks
 WHERE id = ?;
+
+-- name: InsertOutbox :execresult
+INSERT INTO task_outbox (id, aggregate_id, destination, event_type, payload, created_at)
+VALUES (?, ?, ?, ?, ?, ?);
+
+-- name: FetchUnsentOutbox :many
+SELECT *
+FROM task_outbox
+WHERE sent_at IS NULL
+ORDER BY created_at ASC, id ASC
+LIMIT ?;
+
+-- name: FetchUnsentOutboxAfter :many
+SELECT *
+FROM task_outbox
+WHERE sent_at IS NULL AND (created_at > ? OR (created_at = ? AND id > ?))
+ORDER BY created_at ASC, id ASC
+LIMIT ?;
+
+-- name: MarkOutboxSent :exec
+UPDATE task_outbox
+SET sent_at = ?
+WHERE id = ? AND sent_at IS NULL;

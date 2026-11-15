@@ -6,60 +6,40 @@ import (
 	"time"
 
 	task "github.com/yuisofull/goload/internal/task"
+	"github.com/yuisofull/goload/internal/task/mysql/sqlc"
 )
 
-const insertOutboxSQL = `INSERT INTO task_outbox (id, aggregate_id, destination, event_type, payload, created_at)
-VALUES (?, ?, ?, ?, ?, ?)`
-
-const fetchUnsentOutboxSQL = `SELECT id, aggregate_id, destination, event_type, payload, created_at
-FROM task_outbox
-WHERE sent_at IS NULL
-ORDER BY created_at ASC, id ASC
-LIMIT ?`
-
-const fetchUnsentOutboxAfterSQL = `SELECT id, aggregate_id, destination, event_type, payload, created_at
-FROM task_outbox
-WHERE sent_at IS NULL AND (created_at > ? OR (created_at = ? AND id > ?))
-ORDER BY created_at ASC, id ASC
-LIMIT ?`
-
-const markOutboxSentSQL = `UPDATE task_outbox SET sent_at = ? WHERE id = ? AND sent_at IS NULL`
-
-// outboxDBTX is the subset of *sql.DB and *sql.Tx the outbox repository uses.
-type outboxDBTX interface {
-	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
-	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-}
-
 type outboxRepo struct {
-	db *sql.DB
+	db      *sql.DB
+	queries *sqlc.Queries
 }
 
 // NewOutboxRepo returns the MySQL implementation of task.OutboxRepository. It
-// uses plain database/sql (no sqlc) and needs parseTime=true in the DSN, which
+// uses the sqlc-generated queries and needs parseTime=true in the DSN, which
 // cmd/task already sets.
 func NewOutboxRepo(db *sql.DB) task.OutboxRepository {
-	return &outboxRepo{db: db}
+	return &outboxRepo{db: db, queries: sqlc.New(db)}
 }
 
-// dbtx returns the transaction DoInTx stored in ctx, or the plain *sql.DB.
-func (r *outboxRepo) dbtx(ctx context.Context) outboxDBTX {
+// q binds the sqlc queries to the transaction DoInTx stored in ctx, or to the
+// plain *sql.DB when there is none.
+func (r *outboxRepo) q(ctx context.Context) *sqlc.Queries {
 	if tx, ok := ctx.Value(txKey{}).(*sql.Tx); ok {
-		return tx
+		return r.queries.WithTx(tx)
 	}
-	return r.db
+	return r.queries
 }
 
 func (r *outboxRepo) InsertUnsent(ctx context.Context, event task.OutboxEvent) error {
-	_, err := r.dbtx(ctx).ExecContext(ctx, insertOutboxSQL,
-		event.ID,
-		event.AggregateID,
-		event.Destination,
-		event.EventType,
-		event.Payload,
+	_, err := r.q(ctx).InsertOutbox(ctx, sqlc.InsertOutboxParams{
+		ID:          event.ID,
+		AggregateID: event.AggregateID,
+		Destination: event.Destination,
+		EventType:   event.EventType,
+		Payload:     event.Payload,
 		// DATETIME(6) keeps microseconds; truncate so MySQL does not round up.
-		event.CreatedAt.UTC().Truncate(time.Microsecond),
-	)
+		CreatedAt: event.CreatedAt.UTC().Truncate(time.Microsecond),
+	})
 	return err
 }
 
@@ -70,42 +50,50 @@ func (r *outboxRepo) FetchUnsent(ctx context.Context, after task.OutboxCursor, l
 	}
 
 	var (
-		rows *sql.Rows
+		rows []sqlc.TaskOutbox
 		err  error
 	)
 	if after.CreatedAt.IsZero() {
-		rows, err = r.dbtx(ctx).QueryContext(ctx, fetchUnsentOutboxSQL, limit)
+		rows, err = r.q(ctx).FetchUnsentOutbox(ctx, int32(limit))
 	} else {
-		rows, err = r.dbtx(ctx).QueryContext(ctx, fetchUnsentOutboxAfterSQL,
-			after.CreatedAt, after.CreatedAt, after.ID, limit)
+		rows, err = r.q(ctx).FetchUnsentOutboxAfter(ctx, sqlc.FetchUnsentOutboxAfterParams{
+			CreatedAt:   after.CreatedAt,
+			CreatedAt_2: after.CreatedAt,
+			ID:          after.ID,
+			Limit:       int32(limit),
+		})
 	}
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
 	var events []task.OutboxEvent
-	for rows.Next() {
-		var event task.OutboxEvent
-		if err := rows.Scan(
-			&event.ID,
-			&event.AggregateID,
-			&event.Destination,
-			&event.EventType,
-			&event.Payload,
-			&event.CreatedAt,
-		); err != nil {
-			return nil, err
-		}
-		events = append(events, event)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+	for _, row := range rows {
+		events = append(events, outboxEventFromRow(row))
 	}
 	return events, nil
 }
 
 func (r *outboxRepo) MarkSent(ctx context.Context, id string) error {
-	_, err := r.dbtx(ctx).ExecContext(ctx, markOutboxSentSQL, time.Now().UTC().Truncate(time.Microsecond), id)
-	return err
+	return r.q(ctx).MarkOutboxSent(ctx, sqlc.MarkOutboxSentParams{
+		SentAt: sql.NullTime{Time: time.Now().UTC().Truncate(time.Microsecond), Valid: true},
+		ID:     id,
+	})
+}
+
+// outboxEventFromRow maps a generated task_outbox row to the domain event.
+func outboxEventFromRow(row sqlc.TaskOutbox) task.OutboxEvent {
+	event := task.OutboxEvent{
+		ID:          row.ID,
+		AggregateID: row.AggregateID,
+		Destination: row.Destination,
+		EventType:   row.EventType,
+		Payload:     row.Payload,
+		CreatedAt:   row.CreatedAt,
+	}
+	if row.SentAt.Valid {
+		sentAt := row.SentAt.Time
+		event.SentAt = &sentAt
+	}
+	return event
 }

@@ -121,7 +121,9 @@ type fakeRows struct {
 }
 
 func (r *fakeRows) Columns() []string {
-	return []string{"id", "aggregate_id", "destination", "event_type", "payload", "created_at"}
+	// The outbox fetch queries are SELECT *, so the row carries every column,
+	// sent_at included.
+	return []string{"id", "aggregate_id", "destination", "event_type", "payload", "created_at", "sent_at"}
 }
 
 func (r *fakeRows) Close() error { return nil }
@@ -224,8 +226,8 @@ func TestOutboxRepo_FetchUnsent_MapsRowsAndPassesLimit(t *testing.T) {
 	fake, db := openFakeDB(t)
 	created := time.Date(2026, 1, 2, 3, 4, 5, 123456000, time.UTC)
 	fake.rows = [][]driver.Value{
-		{"evt-1", int64(42), "dispatch", "TaskCreated", []byte(`{"task_id":42}`), created},
-		{"evt-2", int64(43), "dispatch", "TaskCreated", []byte(`{"task_id":43}`), created.Add(time.Second)},
+		{"evt-1", int64(42), "dispatch", "TaskCreated", []byte(`{"task_id":42}`), created, nil},
+		{"evt-2", int64(43), "dispatch", "TaskCreated", []byte(`{"task_id":43}`), created.Add(time.Second), nil},
 	}
 
 	events, err := NewOutboxRepo(db).FetchUnsent(context.Background(), task.OutboxCursor{}, 10)
@@ -274,8 +276,9 @@ func TestOutboxRepo_MarkSent_OnlyTouchesUnsentRow(t *testing.T) {
 	steps, calls := fake.snapshot()
 	require.Equal(t, []string{"exec"}, steps)
 	require.Len(t, calls, 1)
-	require.Contains(t, calls[0].query, "UPDATE task_outbox SET sent_at = ?")
-	require.Contains(t, calls[0].query, "AND sent_at IS NULL")
+	require.Contains(t, calls[0].query, "UPDATE task_outbox")
+	require.Contains(t, calls[0].query, "SET sent_at = ?")
+	require.Contains(t, calls[0].query, "WHERE id = ? AND sent_at IS NULL")
 	require.Len(t, calls[0].args, 2)
 	sentAt, ok := calls[0].args[0].(time.Time)
 	require.True(t, ok, "sent_at must be bound as time.Time")
@@ -312,7 +315,7 @@ func TestOutboxRepo_FetchUnsent_CursorUsesKeysetPredicate(t *testing.T) {
 	fake, db := openFakeDB(t)
 	created := time.Date(2026, 1, 2, 3, 4, 5, 123456000, time.UTC)
 	fake.rows = [][]driver.Value{
-		{"evt-3", int64(43), "dispatch", "TaskCreated", []byte(`{}`), created.Add(time.Second)},
+		{"evt-3", int64(43), "dispatch", "TaskCreated", []byte(`{}`), created.Add(time.Second), nil},
 	}
 
 	cursor := task.OutboxCursor{CreatedAt: created, ID: "evt-2"}

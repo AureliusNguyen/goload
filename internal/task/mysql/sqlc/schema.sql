@@ -31,3 +31,17 @@ CREATE TABLE
         INDEX (of_account_id),
         INDEX (status)
     );
+
+CREATE TABLE
+    task_outbox (
+        id CHAR(36) NOT NULL,
+        aggregate_id BIGINT UNSIGNED NOT NULL,
+        destination VARCHAR(32) NOT NULL,
+        event_type VARCHAR(64) NOT NULL,
+        payload MEDIUMBLOB NOT NULL,
+        created_at DATETIME(6) NOT NULL,
+        sent_at DATETIME(6) NULL DEFAULT NULL,
+        PRIMARY KEY (id),
+        INDEX task_outbox_unsent_idx (sent_at, created_at),
+        INDEX task_outbox_aggregate_idx (aggregate_id)
+    );

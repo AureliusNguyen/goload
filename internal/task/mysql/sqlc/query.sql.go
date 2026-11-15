@@ -9,6 +9,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"time"
 )
 
 const createTask = `-- name: CreateTask :execresult
@@ -72,6 +73,96 @@ func (q *Queries) DeleteTask(ctx context.Context, id uint64) error {
 	return err
 }
 
+const fetchUnsentOutbox = `-- name: FetchUnsentOutbox :many
+SELECT id, aggregate_id, destination, event_type, payload, created_at, sent_at
+FROM task_outbox
+WHERE sent_at IS NULL
+ORDER BY created_at ASC, id ASC
+LIMIT ?
+`
+
+func (q *Queries) FetchUnsentOutbox(ctx context.Context, limit int32) ([]TaskOutbox, error) {
+	rows, err := q.db.QueryContext(ctx, fetchUnsentOutbox, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []TaskOutbox
+	for rows.Next() {
+		var i TaskOutbox
+		if err := rows.Scan(
+			&i.ID,
+			&i.AggregateID,
+			&i.Destination,
+			&i.EventType,
+			&i.Payload,
+			&i.CreatedAt,
+			&i.SentAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const fetchUnsentOutboxAfter = `-- name: FetchUnsentOutboxAfter :many
+SELECT id, aggregate_id, destination, event_type, payload, created_at, sent_at
+FROM task_outbox
+WHERE sent_at IS NULL AND (created_at > ? OR (created_at = ? AND id > ?))
+ORDER BY created_at ASC, id ASC
+LIMIT ?
+`
+
+type FetchUnsentOutboxAfterParams struct {
+	CreatedAt   time.Time `json:"created_at"`
+	CreatedAt_2 time.Time `json:"created_at_2"`
+	ID          string    `json:"id"`
+	Limit       int32     `json:"limit"`
+}
+
+func (q *Queries) FetchUnsentOutboxAfter(ctx context.Context, arg FetchUnsentOutboxAfterParams) ([]TaskOutbox, error) {
+	rows, err := q.db.QueryContext(ctx, fetchUnsentOutboxAfter,
+		arg.CreatedAt,
+		arg.CreatedAt_2,
+		arg.ID,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []TaskOutbox
+	for rows.Next() {
+		var i TaskOutbox
+		if err := rows.Scan(
+			&i.ID,
+			&i.AggregateID,
+			&i.Destination,
+			&i.EventType,
+			&i.Payload,
+			&i.CreatedAt,
+			&i.SentAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getTaskById = `-- name: GetTaskById :one
 SELECT id, of_account_id, file_name, source_url, source_type, headers, source_auth, storage_type, storage_path, checksum_type, checksum_value, concurrency, max_speed, max_retries, timeout, status, progress, downloaded_bytes, total_bytes, error_message, metadata, created_at, updated_at, completed_at, last_accessed_at, expiration_days
 FROM tasks
@@ -123,6 +214,31 @@ func (q *Queries) GetTaskCountByAccountId(ctx context.Context, ofAccountID uint6
 	var count int64
 	err := row.Scan(&count)
 	return count, err
+}
+
+const insertOutbox = `-- name: InsertOutbox :execresult
+INSERT INTO task_outbox (id, aggregate_id, destination, event_type, payload, created_at)
+VALUES (?, ?, ?, ?, ?, ?)
+`
+
+type InsertOutboxParams struct {
+	ID          string    `json:"id"`
+	AggregateID uint64    `json:"aggregate_id"`
+	Destination string    `json:"destination"`
+	EventType   string    `json:"event_type"`
+	Payload     []byte    `json:"payload"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+func (q *Queries) InsertOutbox(ctx context.Context, arg InsertOutboxParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, insertOutbox,
+		arg.ID,
+		arg.AggregateID,
+		arg.Destination,
+		arg.EventType,
+		arg.Payload,
+		arg.CreatedAt,
+	)
 }
 
 const listTasks = `-- name: ListTasks :many
@@ -187,6 +303,22 @@ func (q *Queries) ListTasks(ctx context.Context, arg ListTasksParams) ([]Task, e
 		return nil, err
 	}
 	return items, nil
+}
+
+const markOutboxSent = `-- name: MarkOutboxSent :exec
+UPDATE task_outbox
+SET sent_at = ?
+WHERE id = ? AND sent_at IS NULL
+`
+
+type MarkOutboxSentParams struct {
+	SentAt sql.NullTime `json:"sent_at"`
+	ID     string       `json:"id"`
+}
+
+func (q *Queries) MarkOutboxSent(ctx context.Context, arg MarkOutboxSentParams) error {
+	_, err := q.db.ExecContext(ctx, markOutboxSent, arg.SentAt, arg.ID)
+	return err
 }
 
 const updateFileChecksum = `-- name: UpdateFileChecksum :exec
