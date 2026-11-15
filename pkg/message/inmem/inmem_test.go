@@ -1,6 +1,7 @@
 package inmem
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -98,5 +99,34 @@ func TestPublishRequiringSubscriber(t *testing.T) {
 		m.Ack()
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for message")
+	}
+}
+
+func TestCloseWhilePublishing_NoRace(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		pub, sub := NewPublisherAndSubscriber(log.NewNopLogger())
+		ctx, cancel := context.WithCancel(context.Background())
+		ch, err := sub.Subscribe(ctx, "t")
+		if err != nil {
+			t.Fatal(err)
+		}
+		// fill the buffer so deliver goroutines block in send
+		for j := 0; j < 300; j++ {
+			_ = pub.Publish("t", message.NewMessage("x", []byte("x")))
+		}
+		cancel()
+		if i%2 == 0 {
+			_ = sub.Close()
+		}
+		// channel must close (drain until closed)
+		timeout := time.After(2 * time.Second)
+		for done := false; !done; {
+			select {
+			case _, ok := <-ch:
+				done = !ok
+			case <-timeout:
+				t.Fatal("channel not closed")
+			}
+		}
 	}
 }

@@ -50,13 +50,12 @@ func (p *Publisher) deliver(subs []*subscription, topic string, msgs ...*message
 			m.SetContext(s.ctx)
 
 			// non-blocking send with goroutine to avoid blocking publisher
-			go func(ch chan *message.Message, mm *message.Message, subCtx context.Context, topic string, mi, si int) {
+			go func(sub *subscription, mm *message.Message, subCtx context.Context, topic string, mi, si int) {
 				level.Debug(p.broker.logger).
 					Log("msg", "inmem.sending", "topic", topic, "msg_index", mi, "sub_index", si)
-				select {
-				case ch <- mm:
+				if sub.send(mm) {
 					level.Debug(p.broker.logger).Log("msg", "inmem.sent", "msg_index", mi, "sub_index", si)
-				case <-subCtx.Done():
+				} else {
 					level.Debug(p.broker.logger).
 						Log("msg", "inmem.subscriber_done_before_send", "msg_index", mi, "sub_index", si)
 					return
@@ -73,11 +72,10 @@ func (p *Publisher) deliver(subs []*subscription, topic string, msgs ...*message
 						// create a fresh copy and resend
 						mm = mm.Copy()
 						mm.SetContext(subCtx)
-						select {
-						case ch <- mm:
+						if sub.send(mm) {
 							level.Debug(p.broker.logger).
 								Log("msg", "inmem.redelivered", "msg_index", mi, "sub_index", si)
-						case <-subCtx.Done():
+						} else {
 							level.Debug(p.broker.logger).
 								Log("msg", "inmem.subscriber_done_during_redeliver", "msg_index", mi, "sub_index", si)
 							return
@@ -88,7 +86,7 @@ func (p *Publisher) deliver(subs []*subscription, topic string, msgs ...*message
 						return
 					}
 				}
-			}(s.ch, m, s.ctx, topic, mi, si)
+			}(s, m, s.ctx, topic, mi, si)
 		}
 	}
 }
