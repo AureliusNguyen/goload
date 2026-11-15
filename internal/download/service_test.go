@@ -179,6 +179,103 @@ func (d *blockingDownloader) Download(
 	}
 }
 
+// readBlockingReader blocks in Read until it is closed, ignoring any context.
+// It models an FTP or BitTorrent body whose Read does not observe ctx: only
+// closing the underlying connection unblocks it. On close Read reports a
+// connection-closed error, as a real closed socket would, so the transfer
+// returns an error rather than a short successful copy.
+type readBlockingReader struct {
+	closed     chan struct{}
+	closeOnce  sync.Once
+	closedFlag atomic.Bool
+}
+
+func newReadBlockingReader() *readBlockingReader {
+	return &readBlockingReader{closed: make(chan struct{})}
+}
+
+func (r *readBlockingReader) Read([]byte) (int, error) {
+	<-r.closed
+	return 0, errors.New("read on closed source connection")
+}
+
+func (r *readBlockingReader) Close() error {
+	r.closeOnce.Do(func() {
+		r.closedFlag.Store(true)
+		close(r.closed)
+	})
+	return nil
+}
+
+// readBlockingDownloader hands back a reader that blocks in Read (not in
+// Download) and ignores ctx, so only closing the reader can interrupt the
+// transfer.
+type readBlockingDownloader struct {
+	fakeDownloader
+	reader *readBlockingReader
+}
+
+func (d *readBlockingDownloader) Download(
+	ctx context.Context,
+	rawURL string,
+	auth *AuthConfig,
+	opts DownloadOptions,
+) (io.ReadCloser, int64, error) {
+	d.downloads.Add(1)
+	return d.reader, int64(len("content")), nil
+}
+
+// hangingCloseReader models an FTP body whose Close unblocks Read (it closes
+// the data connection) but then blocks (the control-connection Quit waits for
+// a silent server). Read stays blocked until Close is called; Close then hangs
+// until the test releases it. It lets a test prove the transfer unwinds
+// without waiting for Close to return.
+type hangingCloseReader struct {
+	readBlocked  chan struct{} // closed by Close: unblocks a pending Read
+	quitRelease  chan struct{} // closed by the test: lets the hung Close return
+	closeOnce    sync.Once
+	releaseOnce  sync.Once
+	closeStarted atomic.Bool
+}
+
+func newHangingCloseReader() *hangingCloseReader {
+	return &hangingCloseReader{
+		readBlocked: make(chan struct{}),
+		quitRelease: make(chan struct{}),
+	}
+}
+
+func (r *hangingCloseReader) Read([]byte) (int, error) {
+	<-r.readBlocked
+	return 0, errors.New("read on closed source connection")
+}
+
+func (r *hangingCloseReader) Close() error {
+	r.closeStarted.Store(true)
+	r.closeOnce.Do(func() { close(r.readBlocked) })
+	<-r.quitRelease
+	return nil
+}
+
+func (r *hangingCloseReader) releaseQuit() {
+	r.releaseOnce.Do(func() { close(r.quitRelease) })
+}
+
+type hangingCloseDownloader struct {
+	fakeDownloader
+	reader *hangingCloseReader
+}
+
+func (d *hangingCloseDownloader) Download(
+	ctx context.Context,
+	rawURL string,
+	auth *AuthConfig,
+	opts DownloadOptions,
+) (io.ReadCloser, int64, error) {
+	d.downloads.Add(1)
+	return d.reader, int64(len("content")), nil
+}
+
 func TestExecuteTaskConcurrencyLimit(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

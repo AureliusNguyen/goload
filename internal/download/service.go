@@ -353,7 +353,26 @@ func (s *service) transfer(
 			return nil, &errors.Error{Code: errors.ErrCodeInternal, Message: "download cancelled", Cause: ctx.Err()}
 		}
 	}
-	defer reader.Close()
+	// Closing the reader interrupts a source Read blocked inside Store that
+	// does not itself observe ctx (FTP, BitTorrent). A dedicated watcher owns
+	// the close so the transfer never waits on it: Close can itself block (an
+	// FTP control-connection Quit waits for a server reply with no timeout),
+	// and a transfer that waited for Close would keep holding its download
+	// slot and, on the attempt path, keep its lease renewed by the heartbeat,
+	// which is the exact liveness bug this guards against. The watcher closes
+	// the reader exactly once, on cancellation or on normal return, and the
+	// transfer returns without waiting for Close to finish. A Close that hangs
+	// strands only this watcher goroutine and its own connection; it never
+	// stalls dispatch or lease recovery.
+	transferDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-transferDone:
+		}
+		_ = reader.Close()
+	}()
+	defer close(transferDone)
 
 	execution.progress.TotalBytes = totalSize
 	hooks.progress(ctx, execution.progress)

@@ -624,6 +624,101 @@ func TestRunAttempt_PauseStopsTheAttemptWithoutReportingFailure(t *testing.T) {
 	})
 }
 
+func TestRunAttempt_PauseInterruptsABlockedSourceRead(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		// A source whose Read blocks and ignores ctx: only closing the reader
+		// unblocks it. This is the case cmd/pocket faces with FTP and
+		// BitTorrent. On pause the transfer must still stop, free its slot and
+		// report no outcome; otherwise it holds the slot and the heartbeat
+		// renews the lease forever, so the reconciler can never recover it.
+		reader := newReadBlockingReader()
+		dl := &readBlockingDownloader{reader: reader}
+		attempts := &fakeAttempts{generation: 1}
+		svc := NewService(&fakeStorage{}, &busSpy{}, WithAttempts(attempts, "worker-1"))
+		svc.RegisterDownloader("HTTP", dl)
+		req := attemptRequest()
+		done := make(chan error, 1)
+		go func() { done <- svc.RunAttempt(t.Context(), req) }()
+		synctest.Wait()
+
+		// The worker is now blocked inside Store, reading the stuck source.
+		if got := dl.downloads.Load(); got != 1 {
+			t.Fatalf("downloads = %d, want 1 (the attempt should be mid-transfer)", got)
+		}
+
+		if err := svc.PauseTask(t.Context(), req.TaskID); err != nil {
+			t.Fatalf("PauseTask() error = %v", err)
+		}
+		// On the fixed code the pause closes the reader, so Read returns and
+		// RunAttempt unwinds. On the unfixed code this receive deadlocks: the
+		// Read never returns, which synctest reports as a stuck bubble.
+		if err := <-done; err != nil {
+			t.Fatalf("RunAttempt() error = %v, want nil", err)
+		}
+
+		if !reader.closedFlag.Load() {
+			t.Fatal("the source reader was never closed on pause")
+		}
+		if got := attempts.count("complete") + attempts.count("fail") + attempts.count("release"); got != 0 {
+			t.Fatalf("calls = %v: a paused attempt must not report any outcome", attempts.log())
+		}
+		if got := svc.GetActiveTaskCount(t.Context()); got != 0 {
+			t.Fatalf("active tasks after pause = %d, want 0", got)
+		}
+	})
+}
+
+func TestRunAttempt_StopReturnsEvenIfReaderCloseHangs(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		// The source Read unblocks when the reader is closed, but Close itself
+		// then hangs (an FTP Quit waiting on a silent control connection). The
+		// attempt must still unwind: free its slot and stop renewing the lease
+		// without waiting for Close. Otherwise a silent FTP server pins the
+		// slot and the heartbeat renews the lease forever.
+		reader := newHangingCloseReader()
+		dl := &hangingCloseDownloader{reader: reader}
+		attempts := &fakeAttempts{generation: 1}
+		svc := NewService(&fakeStorage{}, &busSpy{}, WithAttempts(attempts, "worker-1"))
+		svc.RegisterDownloader("HTTP", dl)
+		req := attemptRequest()
+		done := make(chan error, 1)
+		go func() { done <- svc.RunAttempt(t.Context(), req) }()
+		synctest.Wait()
+
+		if got := dl.downloads.Load(); got != 1 {
+			t.Fatalf("downloads = %d, want 1 (the attempt should be mid-transfer)", got)
+		}
+
+		if err := svc.PauseTask(t.Context(), req.TaskID); err != nil {
+			t.Fatalf("PauseTask() error = %v", err)
+		}
+		// On the fixed code RunAttempt returns while Close is still blocked. On
+		// the superseded sync.Once version the deferred close blocked on the
+		// watcher's in-flight Close, so this receive deadlocked.
+		if err := <-done; err != nil {
+			t.Fatalf("RunAttempt() error = %v, want nil", err)
+		}
+		if !reader.closeStarted.Load() {
+			t.Fatal("Close was never called on the stuck reader")
+		}
+		renewsAtReturn := attempts.count("renew")
+		if got := svc.GetActiveTaskCount(t.Context()); got != 0 {
+			t.Fatalf("active tasks after stop = %d, want 0", got)
+		}
+
+		// Let the hung Close finish so the watcher goroutine exits and the
+		// synctest bubble drains; no further renewal may happen after return.
+		reader.releaseQuit()
+		synctest.Wait()
+		if got := attempts.count("renew"); got != renewsAtReturn {
+			t.Fatalf("lease renewed %d more time(s) after the attempt returned", got-renewsAtReturn)
+		}
+		if got := attempts.count("complete") + attempts.count("fail") + attempts.count("release"); got != 0 {
+			t.Fatalf("calls = %v: a stopped attempt must not report any outcome", attempts.log())
+		}
+	})
+}
+
 func TestRunAttempt_WorkerShutdownReleasesInsteadOfFailing(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		dl := &blockingDownloader{started: make(chan struct{}, 1), release: make(chan struct{})}
