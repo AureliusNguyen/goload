@@ -17,6 +17,7 @@ import (
 	"github.com/yuisofull/goload/internal/errors"
 	"github.com/yuisofull/goload/internal/events"
 	"github.com/yuisofull/goload/internal/storage"
+	"github.com/yuisofull/goload/internal/task"
 )
 
 const DOWNLOAD_PROGRESS_UPDATE_INTERVAL = 3 * time.Second
@@ -71,6 +72,11 @@ type service struct {
 	sem                *semaphore.Weighted
 	lastProgressUpdate map[uint64]time.Time
 	progressMu         sync.Mutex
+	// attempts, workerID and renewInterval configure the attempt-aware path
+	// (RunAttempt). attempts is nil for the legacy event-driven path.
+	attempts      task.AttemptService
+	workerID      string
+	renewInterval time.Duration
 }
 
 type (
@@ -113,6 +119,7 @@ func NewService(storageBackend storage.Backend, publisher EventPublisher, opts .
 		errorHandler:       func(ctx context.Context, err error) {},
 		maxConcurrent:      5,
 		storageType:        storage.TypeLocal,
+		renewInterval:      DefaultRenewInterval,
 	}
 
 	for _, opt := range opts {
@@ -204,17 +211,78 @@ func (s *service) ExecuteTask(ctx context.Context, req TaskRequest) error {
 	return nil
 }
 
-// executeDownload performs the actual download and storage
-func (s *service) executeDownload(execution *taskExecution, downloader Downloader) error {
+// transferHooks are the points where the legacy event path and the attempt
+// path differ while one file is downloaded and stored.
+type transferHooks struct {
+	// downloading runs first, before the source is contacted.
+	downloading func(ctx context.Context) error
+	// progress receives every progress snapshot the transfer produces.
+	progress func(ctx context.Context, p Progress)
+	// storing runs exactly once, when the source stream is drained and the
+	// object is about to be finalized. A failure aborts the transfer.
+	storing func(ctx context.Context) error
+}
+
+// transferResult describes the object one transfer stored.
+type transferResult struct {
+	FileName    string
+	FileSize    int64
+	ContentType string
+	MD5         string
+	StorageKey  string
+}
+
+// drainNotifier reports the end of the source stream exactly once, before
+// io.EOF reaches the storage backend.
+type drainNotifier struct {
+	reader  io.Reader
+	onDrain func() error
+
+	mu    sync.Mutex
+	fired bool
+	err   error
+}
+
+func (d *drainNotifier) Read(p []byte) (int, error) {
+	n, err := d.reader.Read(p)
+	if err == io.EOF {
+		if hookErr := d.fire(); hookErr != nil {
+			return n, hookErr
+		}
+	}
+	return n, err
+}
+
+// fire runs the hook on its first call and returns that result on every call.
+func (d *drainNotifier) fire() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !d.fired {
+		d.fired = true
+		d.err = d.onDrain()
+	}
+	return d.err
+}
+
+// hookErr returns the hook's error; nil when it has not run or it succeeded.
+func (d *drainNotifier) hookErr() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.err
+}
+
+// transfer downloads the task's source and streams it into the storage key of
+// this execution. It publishes nothing itself; the hooks observe it.
+func (s *service) transfer(
+	execution *taskExecution,
+	downloader Downloader,
+	hooks transferHooks,
+) (*transferResult, error) {
 	taskReq := execution.task
 	ctx := execution.ctx
 
-	if err := s.publisher.PublishTaskStatusUpdated(ctx, events.TaskStatusUpdatedEvent{
-		TaskID:    taskReq.TaskID,
-		Status:    events.StatusDownloading,
-		UpdatedAt: time.Now(),
-	}); err != nil {
-		return &errors.Error{Code: errors.ErrCodeInternal, Message: "failed to publish task status", Cause: err}
+	if err := hooks.downloading(ctx); err != nil {
+		return nil, err
 	}
 
 	downloadOpts := DownloadOptions{
@@ -245,7 +313,7 @@ func (s *service) executeDownload(execution *taskExecution, downloader Downloade
 
 	metadata, err := downloader.GetFileInfo(ctx, taskReq.SourceURL, sourceAuth)
 	if err != nil {
-		return &errors.Error{Code: errors.ErrCodeInternal, Message: "failed to get file info", Cause: err}
+		return nil, &errors.Error{Code: errors.ErrCodeInternal, Message: "failed to get file info", Cause: err}
 	}
 
 	maxRetries := max(downloadOpts.MaxRetries, 0)
@@ -266,7 +334,7 @@ func (s *service) executeDownload(execution *taskExecution, downloader Downloade
 
 		// If this was the last attempt, fail
 		if attempt == maxAttempts {
-			return &errors.Error{
+			return nil, &errors.Error{
 				Code:    errors.ErrCodeInternal,
 				Message: "failed to start download",
 				Cause:   fmt.Errorf("downloading %s: %w", taskReq.SourceURL, dlErr),
@@ -282,13 +350,13 @@ func (s *service) executeDownload(execution *taskExecution, downloader Downloade
 		select {
 		case <-time.After(backoff + jitter):
 		case <-ctx.Done():
-			return &errors.Error{Code: errors.ErrCodeInternal, Message: "download cancelled", Cause: ctx.Err()}
+			return nil, &errors.Error{Code: errors.ErrCodeInternal, Message: "download cancelled", Cause: ctx.Err()}
 		}
 	}
 	defer reader.Close()
 
 	execution.progress.TotalBytes = totalSize
-	s.updateProgress(ctx, taskReq.TaskID, execution.progress)
+	hooks.progress(ctx, execution.progress)
 
 	progressReader := NewPausableProgressReader(reader, func(bytesRead int64) {
 		p := execution.progress
@@ -299,47 +367,94 @@ func (s *service) executeDownload(execution *taskExecution, downloader Downloade
 			}
 			p.UpdatedAt = time.Now()
 			execution.progress = p
-			s.updateProgress(ctx, taskReq.TaskID, p)
+			hooks.progress(ctx, p)
 		}
 	})
 
-	if err := s.publisher.PublishTaskStatusUpdated(ctx, events.TaskStatusUpdatedEvent{
-		TaskID:    taskReq.TaskID,
-		Status:    events.StatusStoring,
-		UpdatedAt: time.Now(),
-	}); err != nil {
-		return &errors.Error{Code: errors.ErrCodeInternal, Message: "failed to publish task status", Cause: err}
+	source := &drainNotifier{
+		reader:  progressReader,
+		onDrain: func() error { return hooks.storing(ctx) },
 	}
-
 	hash := md5.New()
-	teeReader := io.TeeReader(progressReader, hash)
 
 	storageKey := s.generateStorageKey(taskReq, metadata.FileName)
-	if err := s.storage.Store(ctx, storageKey, teeReader, &storage.FileMetadata{
+	storeErr := s.storage.Store(ctx, storageKey, io.TeeReader(source, hash), &storage.FileMetadata{
 		FileName:     metadata.FileName,
 		FileSize:     metadata.FileSize,
 		ContentType:  metadata.ContentType,
 		LastModified: time.Now(),
-	}); err != nil {
+	})
+	if storeErr == nil {
+		// A backend that stops reading at the announced size never reads
+		// io.EOF, so make sure the storing step ran before the result is used.
+		storeErr = source.fire()
+	}
+	if storeErr != nil {
 		// storageKey belongs to this attempt alone (it carries the attempt
 		// generation), so this cleanup cannot remove an object stored by
 		// another attempt of the same task.
 		_ = s.storage.Delete(context.Background(), storageKey)
-		return &errors.Error{Code: errors.ErrCodeInternal, Message: "failed to store file", Cause: err}
+		if hookErr := source.hookErr(); hookErr != nil {
+			// The storing step itself failed (for an attempt: usually a
+			// fencing rejection). Report that, not the storage error it caused.
+			return nil, hookErr
+		}
+		return nil, &errors.Error{Code: errors.ErrCodeInternal, Message: "failed to store file", Cause: storeErr}
 	}
-	md5Hash := hex.EncodeToString(hash.Sum(nil))
 
-	completedEvent := events.TaskCompletedEvent{
-		TaskID:      taskReq.TaskID,
+	return &transferResult{
 		FileName:    metadata.FileName,
 		FileSize:    totalSize,
 		ContentType: metadata.ContentType,
+		MD5:         hex.EncodeToString(hash.Sum(nil)),
+		StorageKey:  storageKey,
+	}, nil
+}
+
+// publishStatus publishes one status notification of the legacy path.
+func (s *service) publishStatus(ctx context.Context, taskID uint64, status events.TaskStatus) error {
+	if err := s.publisher.PublishTaskStatusUpdated(ctx, events.TaskStatusUpdatedEvent{
+		TaskID:    taskID,
+		Status:    status,
+		UpdatedAt: time.Now(),
+	}); err != nil {
+		return &errors.Error{Code: errors.ErrCodeInternal, Message: "failed to publish task status", Cause: err}
+	}
+	return nil
+}
+
+// executeDownload runs one transfer on the legacy event-driven path: status,
+// progress and the result are published as task events.
+func (s *service) executeDownload(execution *taskExecution, downloader Downloader) error {
+	taskReq := execution.task
+	ctx := execution.ctx
+
+	result, err := s.transfer(execution, downloader, transferHooks{
+		downloading: func(ctx context.Context) error {
+			return s.publishStatus(ctx, taskReq.TaskID, events.StatusDownloading)
+		},
+		progress: func(ctx context.Context, p Progress) {
+			s.updateProgress(ctx, taskReq.TaskID, p)
+		},
+		storing: func(ctx context.Context) error {
+			return s.publishStatus(ctx, taskReq.TaskID, events.StatusStoring)
+		},
+	})
+	if err != nil {
+		return err
+	}
+
+	completedEvent := events.TaskCompletedEvent{
+		TaskID:      taskReq.TaskID,
+		FileName:    result.FileName,
+		FileSize:    result.FileSize,
+		ContentType: result.ContentType,
 		Checksum: &events.ChecksumInfo{
 			ChecksumType:  "md5",
-			ChecksumValue: md5Hash,
+			ChecksumValue: result.MD5,
 		},
 		StorageType: s.storageType.String(),
-		StorageKey:  storageKey,
+		StorageKey:  result.StorageKey,
 		CompletedAt: time.Now(),
 	}
 
@@ -347,7 +462,7 @@ func (s *service) executeDownload(execution *taskExecution, downloader Downloade
 		return &errors.Error{Code: errors.ErrCodeInternal, Message: "failed to publish completion event", Cause: err}
 	}
 
-	execution.progress.DownloadedBytes = totalSize
+	execution.progress.DownloadedBytes = result.FileSize
 	execution.progress.Progress = 100.0
 	execution.progress.UpdatedAt = time.Now()
 	s.updateProgress(ctx, taskReq.TaskID, execution.progress)

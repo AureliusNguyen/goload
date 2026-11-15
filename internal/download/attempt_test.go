@@ -1,0 +1,662 @@
+package download
+
+import (
+	"context"
+	"errors"
+	"io"
+	"reflect"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"testing/synctest"
+	"time"
+
+	apperrors "github.com/yuisofull/goload/internal/errors"
+	"github.com/yuisofull/goload/internal/events"
+	"github.com/yuisofull/goload/internal/storage"
+	"github.com/yuisofull/goload/internal/task"
+)
+
+// fakeAttempts is a scripted task.AttemptService. It hands out one generation
+// and records every call in order: "claim", "renew" (a heartbeat), "storing"
+// (a heartbeat that reports the storing step), "complete", "fail", "release".
+type fakeAttempts struct {
+	mu sync.Mutex
+
+	generation   uint64  // generation ClaimTask hands out
+	claimErr     error   // returned by ClaimTask
+	renewErr     error   // returned by every RenewLease while set
+	storingErr   error   // returned by a RenewLease that reports Storing
+	completeErrs []error // returned by CompleteAttempt, one per call, then nil
+
+	calls     []string
+	workers   []string
+	completed []task.AttemptResult
+	failures  []error
+}
+
+func (a *fakeAttempts) ClaimTask(_ context.Context, taskID uint64, workerID string) (*task.Attempt, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.calls = append(a.calls, "claim")
+	a.workers = append(a.workers, workerID)
+	if a.claimErr != nil {
+		return nil, a.claimErr
+	}
+	return &task.Attempt{TaskID: taskID, WorkerID: workerID, Generation: a.generation}, nil
+}
+
+func (a *fakeAttempts) RenewLease(
+	_ context.Context,
+	_ uint64,
+	workerID string,
+	_ uint64,
+	update task.LeaseUpdate,
+) (time.Time, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.workers = append(a.workers, workerID)
+	if update.Storing {
+		a.calls = append(a.calls, "storing")
+	} else {
+		a.calls = append(a.calls, "renew")
+	}
+	if a.renewErr != nil {
+		return time.Time{}, a.renewErr
+	}
+	if update.Storing && a.storingErr != nil {
+		return time.Time{}, a.storingErr
+	}
+	return time.Time{}, nil
+}
+
+func (a *fakeAttempts) CompleteAttempt(
+	_ context.Context,
+	_ uint64,
+	workerID string,
+	_ uint64,
+	result task.AttemptResult,
+) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.calls = append(a.calls, "complete")
+	a.workers = append(a.workers, workerID)
+	a.completed = append(a.completed, result)
+	if len(a.completeErrs) == 0 {
+		return nil
+	}
+	err := a.completeErrs[0]
+	a.completeErrs = a.completeErrs[1:]
+	return err
+}
+
+func (a *fakeAttempts) FailAttempt(_ context.Context, _ uint64, workerID string, _ uint64, cause error) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.calls = append(a.calls, "fail")
+	a.workers = append(a.workers, workerID)
+	a.failures = append(a.failures, cause)
+	return nil
+}
+
+func (a *fakeAttempts) ReleaseAttempt(_ context.Context, _ uint64, workerID string, _ uint64) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.calls = append(a.calls, "release")
+	a.workers = append(a.workers, workerID)
+	return nil
+}
+
+func (a *fakeAttempts) setRenewErr(err error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.renewErr = err
+}
+
+func (a *fakeAttempts) log() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.calls...)
+}
+
+// count returns how often a call was recorded.
+func (a *fakeAttempts) count(call string) int {
+	n := 0
+	for _, c := range a.log() {
+		if c == call {
+			n++
+		}
+	}
+	return n
+}
+
+// first returns the position of the first such call, or -1.
+func (a *fakeAttempts) first(call string) int {
+	for i, c := range a.log() {
+		if c == call {
+			return i
+		}
+	}
+	return -1
+}
+
+func (a *fakeAttempts) results() []task.AttemptResult {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]task.AttemptResult(nil), a.completed...)
+}
+
+func (a *fakeAttempts) failureCauses() []error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]error(nil), a.failures...)
+}
+
+func (a *fakeAttempts) workerIDs() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.workers...)
+}
+
+// rejectedErr is the fencing rejection as the task service returns it.
+func rejectedErr() error {
+	return &apperrors.Error{
+		Code:    apperrors.ErrCodeConflict,
+		Message: "attempt rejected",
+		Cause:   task.ErrAttemptRejected,
+	}
+}
+
+// notClaimableErr is a rejected claim as the task service returns it.
+func notClaimableErr() error {
+	return &apperrors.Error{
+		Code:    apperrors.ErrCodeInvalidState,
+		Message: "task is not claimable",
+		Cause:   task.ErrTaskNotClaimable,
+	}
+}
+
+// busSpy counts the lifecycle events the download service publishes itself.
+type busSpy struct {
+	published atomic.Int32
+}
+
+func (b *busSpy) PublishTaskStatusUpdated(context.Context, events.TaskStatusUpdatedEvent) error {
+	b.published.Add(1)
+	return nil
+}
+
+func (b *busSpy) PublishTaskProgressUpdated(context.Context, events.TaskProgressUpdatedEvent) error {
+	b.published.Add(1)
+	return nil
+}
+
+func (b *busSpy) PublishTaskCompleted(context.Context, events.TaskCompletedEvent) error {
+	b.published.Add(1)
+	return nil
+}
+
+func (b *busSpy) PublishTaskFailed(context.Context, events.TaskFailedEvent) error {
+	b.published.Add(1)
+	return nil
+}
+
+// attemptRequest is the dispatch the RunAttempt tests execute.
+func attemptRequest() TaskRequest {
+	return TaskRequest{TaskID: 9, SourceURL: "https://example.com/files/file.txt", SourceType: "HTTP"}
+}
+
+// attemptKey is the storage key RunAttempt must use for a generation of
+// attemptRequest. fakeDownloader resolves the file name file.txt.
+func attemptKey(svc *service, generation uint64) string {
+	req := attemptRequest()
+	req.Generation = generation
+	return svc.generateStorageKey(req, "file.txt")
+}
+
+func TestRunAttempt_ClaimsStoresUnderTheGenerationKeyAndCompletes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := &keyedStorage{objects: map[string]bool{}}
+		attempts := &fakeAttempts{generation: 3}
+		bus := &busSpy{}
+		svc := NewService(store, bus, WithAttempts(attempts, "worker-1"))
+		svc.RegisterDownloader("HTTP", &fakeDownloader{})
+
+		if err := svc.RunAttempt(t.Context(), attemptRequest()); err != nil {
+			t.Fatalf("RunAttempt() error = %v", err)
+		}
+
+		wantKey := attemptKey(svc, 3)
+		if !strings.HasPrefix(wantKey, "9/3/file-") {
+			t.Fatalf("the attempt key must carry the claimed generation, got %q", wantKey)
+		}
+		if !store.has(wantKey) {
+			t.Fatalf("object %q was not stored", wantKey)
+		}
+		want := task.AttemptResult{
+			FileName:    "file.txt",
+			FileSize:    7,
+			ContentType: "text/plain",
+			Checksum:    &task.ChecksumInfo{ChecksumType: "md5", ChecksumValue: "9a0364b9e99bb480dd25e1f0284c8555"},
+			StorageType: storage.TypeLocal,
+			StorageKey:  wantKey,
+		}
+		results := attempts.results()
+		if len(results) != 1 || !reflect.DeepEqual(results[0], want) {
+			t.Fatalf("CompleteAttempt results = %+v, want exactly %+v", results, want)
+		}
+		if got := attempts.first("claim"); got != 0 {
+			t.Fatalf("calls = %v, want the claim first", attempts.log())
+		}
+		storing, complete := attempts.first("storing"), attempts.first("complete")
+		if storing == -1 || storing > complete {
+			t.Fatalf("calls = %v, want the storing step reported before the completion", attempts.log())
+		}
+		for _, worker := range attempts.workerIDs() {
+			if worker != "worker-1" {
+				t.Fatalf("every ownership call must carry the worker id, got %q", worker)
+			}
+		}
+		if got := attempts.count("fail") + attempts.count("release"); got != 0 {
+			t.Fatalf("calls = %v, want no fail and no release", attempts.log())
+		}
+		if got := bus.published.Load(); got != 0 {
+			t.Fatalf("an attempt must not publish lifecycle events itself, published %d", got)
+		}
+		if got := svc.GetActiveTaskCount(t.Context()); got != 0 {
+			t.Fatalf("active tasks after the attempt = %d, want 0", got)
+		}
+	})
+}
+
+func TestRunAttempt_ClaimOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		claimErr error
+		wantErr  bool
+	}{
+		{name: "a task that is not claimable is dropped", claimErr: notClaimableErr()},
+		{
+			name:     "a deleted task is dropped",
+			claimErr: &apperrors.Error{Code: apperrors.ErrCodeNotFound, Message: "Task not found"},
+		},
+		{name: "an unreachable task service is reported", claimErr: errors.New("database is locked"), wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				dl := &fakeDownloader{}
+				attempts := &fakeAttempts{generation: 1, claimErr: tc.claimErr}
+				svc := NewService(&fakeStorage{}, &busSpy{}, WithAttempts(attempts, "worker-1"))
+				svc.RegisterDownloader("HTTP", dl)
+
+				err := svc.RunAttempt(t.Context(), attemptRequest())
+
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("RunAttempt() error = %v, wantErr %v", err, tc.wantErr)
+				}
+				if got := dl.downloads.Load(); got != 0 {
+					t.Fatalf("started %d downloads for a task that was not claimed", got)
+				}
+				if got := attempts.log(); len(got) != 1 {
+					t.Fatalf("calls = %v, want only the claim", got)
+				}
+				if got := svc.GetActiveTaskCount(t.Context()); got != 0 {
+					t.Fatalf("active tasks = %d, want 0", got)
+				}
+			})
+		})
+	}
+}
+
+// brokenInfoDownloader cannot reach its source.
+type brokenInfoDownloader struct{ fakeDownloader }
+
+func (d *brokenInfoDownloader) GetFileInfo(context.Context, string, *AuthConfig) (*FileMetadata, error) {
+	return nil, errors.New("404 not found")
+}
+
+func TestRunAttempt_FailureIsRecordedWithFailAttempt(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		sourceType  string
+		wantCode    apperrors.Code
+		wantMessage string
+	}{
+		{"a source error", "HTTP", apperrors.ErrCodeInternal, "failed to get file info"},
+		{"an unknown source type", "GOPHER", apperrors.ErrCodeInvalidInput, "no downloader for source type GOPHER"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				attempts := &fakeAttempts{generation: 1}
+				bus := &busSpy{}
+				svc := NewService(&fakeStorage{}, bus, WithAttempts(attempts, "worker-1"))
+				svc.RegisterDownloader("HTTP", &brokenInfoDownloader{})
+				req := attemptRequest()
+				req.SourceType = tc.sourceType
+
+				if err := svc.RunAttempt(t.Context(), req); err != nil {
+					t.Fatalf("RunAttempt() error = %v, want nil: the failure is recorded", err)
+				}
+
+				failures := attempts.failureCauses()
+				if len(failures) != 1 {
+					t.Fatalf("FailAttempt calls = %d, want 1 (calls = %v)", len(failures), attempts.log())
+				}
+				cause := apperrors.AsError(failures[0])
+				if cause == nil || cause.Code != tc.wantCode || cause.Message != tc.wantMessage {
+					t.Fatalf("FailAttempt cause = %v, want %s: %s", failures[0], tc.wantCode, tc.wantMessage)
+				}
+				if got := attempts.count("complete") + attempts.count("release"); got != 0 {
+					t.Fatalf("calls = %v, want no complete and no release", attempts.log())
+				}
+				if got := bus.published.Load(); got != 0 {
+					t.Fatalf("a failed attempt must not publish task.failed itself, published %d", got)
+				}
+			})
+		})
+	}
+}
+
+func TestRunAttempt_HeartbeatRenewsTheLeaseWhileDownloading(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		dl := &blockingDownloader{started: make(chan struct{}, 1), release: release}
+		attempts := &fakeAttempts{generation: 1}
+		svc := NewService(&fakeStorage{}, &busSpy{}, WithAttempts(attempts, "worker-1"))
+		svc.RegisterDownloader("HTTP", dl)
+		done := make(chan error, 1)
+		go func() { done <- svc.RunAttempt(t.Context(), attemptRequest()) }()
+		synctest.Wait()
+		if got := attempts.count("renew"); got != 0 {
+			t.Fatalf("renewals before the first interval = %d, want 0", got)
+		}
+
+		// The source stays silent for three renew intervals: only the timer
+		// keeps the lease alive.
+		time.Sleep(3*DefaultRenewInterval + time.Second)
+		synctest.Wait()
+		if got := attempts.count("renew"); got != 3 {
+			t.Fatalf("renewals after three intervals = %d, want 3", got)
+		}
+
+		close(release)
+		if err := <-done; err != nil {
+			t.Fatalf("RunAttempt() error = %v", err)
+		}
+		if got := attempts.count("complete"); got != 1 {
+			t.Fatalf("calls = %v, want one completion", attempts.log())
+		}
+	})
+}
+
+func TestRunAttempt_RejectedHeartbeatStopsWithoutForcingAResult(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := &keyedStorage{objects: map[string]bool{}}
+		dl := &blockingDownloader{started: make(chan struct{}, 1), release: make(chan struct{})}
+		attempts := &fakeAttempts{generation: 1}
+		svc := NewService(store, &busSpy{}, WithAttempts(attempts, "worker-1"))
+		svc.RegisterDownloader("HTTP", dl)
+		done := make(chan error, 1)
+		go func() { done <- svc.RunAttempt(t.Context(), attemptRequest()) }()
+		synctest.Wait()
+
+		// Another worker took the task over (or the user paused or cancelled
+		// it): every later call of this attempt is rejected.
+		attempts.setRenewErr(rejectedErr())
+		time.Sleep(DefaultRenewInterval + time.Second)
+		synctest.Wait()
+
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("RunAttempt() error = %v, want nil: a fenced attempt just stops", err)
+			}
+		default:
+			t.Fatal("RunAttempt() is still running after its heartbeat was rejected")
+		}
+		if got := attempts.count("complete") + attempts.count("fail") + attempts.count("release"); got != 0 {
+			t.Fatalf("calls = %v: a fenced attempt must not force any outcome", attempts.log())
+		}
+		if store.has(attemptKey(svc, 1)) {
+			t.Fatal("a fenced attempt must not leave an object behind")
+		}
+		if got := svc.GetActiveTaskCount(t.Context()); got != 0 {
+			t.Fatalf("active tasks = %d, want 0", got)
+		}
+	})
+}
+
+func TestRunAttempt_RejectedStoringStepRemovesOnlyItsOwnObject(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := &keyedStorage{objects: map[string]bool{}}
+		attempts := &fakeAttempts{generation: 2, storingErr: rejectedErr()}
+		svc := NewService(store, &busSpy{}, WithAttempts(attempts, "worker-1"))
+		svc.RegisterDownloader("HTTP", &fakeDownloader{})
+		// The attempt that took the task over already stored its object.
+		winnerKey := attemptKey(svc, 3)
+		store.objects[winnerKey] = true
+
+		if err := svc.RunAttempt(t.Context(), attemptRequest()); err != nil {
+			t.Fatalf("RunAttempt() error = %v, want nil: a fenced attempt just stops", err)
+		}
+
+		ownKey := attemptKey(svc, 2)
+		if got := store.deletedKeys(); len(got) != 1 || got[0] != ownKey {
+			t.Fatalf("deleted keys = %v, want only the attempt's own key %q", got, ownKey)
+		}
+		if !store.has(winnerKey) {
+			t.Fatal("the fenced attempt deleted the winner's object")
+		}
+		if got := attempts.count("complete") + attempts.count("fail") + attempts.count("release"); got != 0 {
+			t.Fatalf("calls = %v: a fenced attempt must not force any outcome", attempts.log())
+		}
+	})
+}
+
+func TestRunAttempt_CompletionOutcomes(t *testing.T) {
+	lost := errors.New("connection reset before the response")
+	for _, tc := range []struct {
+		name         string
+		completeErrs []error
+		wantErr      bool
+		wantCalls    int
+		wantKept     bool
+	}{
+		{
+			name:         "a lost response is retried with the same result",
+			completeErrs: []error{lost},
+			wantCalls:    2,
+			wantKept:     true,
+		},
+		{
+			name:         "an unknown outcome keeps the object and reports no failure",
+			completeErrs: []error{lost, lost, lost},
+			wantErr:      true,
+			wantCalls:    3,
+			wantKept:     true,
+		},
+		{
+			name:         "a rejection on the first try removes the object",
+			completeErrs: []error{rejectedErr()},
+			wantCalls:    1,
+		},
+		{
+			name:         "a rejection after an unanswered try keeps the object",
+			completeErrs: []error{lost, rejectedErr()},
+			wantCalls:    2,
+			wantKept:     true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				store := &keyedStorage{objects: map[string]bool{}}
+				dl := &fakeDownloader{}
+				attempts := &fakeAttempts{generation: 1, completeErrs: tc.completeErrs}
+				svc := NewService(store, &busSpy{}, WithAttempts(attempts, "worker-1"))
+				svc.RegisterDownloader("HTTP", dl)
+
+				err := svc.RunAttempt(t.Context(), attemptRequest())
+
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("RunAttempt() error = %v, wantErr %v", err, tc.wantErr)
+				}
+				results := attempts.results()
+				if len(results) != tc.wantCalls {
+					t.Fatalf("CompleteAttempt calls = %d, want %d", len(results), tc.wantCalls)
+				}
+				for _, result := range results[1:] {
+					if !reflect.DeepEqual(result, results[0]) {
+						t.Fatalf("a completion retry must resend the same result: %+v vs %+v", result, results[0])
+					}
+				}
+				if got := dl.downloads.Load(); got != 1 {
+					t.Fatalf("downloads = %d, want 1: a completion retry must not download again", got)
+				}
+				if got := store.has(attemptKey(svc, 1)); got != tc.wantKept {
+					t.Fatalf("object kept = %v, want %v", got, tc.wantKept)
+				}
+				if got := attempts.count("fail") + attempts.count("release"); got != 0 {
+					t.Fatalf("calls = %v: a stored attempt must not be failed or released", attempts.log())
+				}
+			})
+		})
+	}
+}
+
+func TestRunAttempt_PauseStopsTheAttemptWithoutReportingFailure(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		dl := &blockingDownloader{started: make(chan struct{}, 1), release: make(chan struct{})}
+		attempts := &fakeAttempts{generation: 1}
+		svc := NewService(&fakeStorage{}, &busSpy{}, WithAttempts(attempts, "worker-1"))
+		svc.RegisterDownloader("HTTP", dl)
+		done := make(chan error, 1)
+		go func() { done <- svc.RunAttempt(t.Context(), attemptRequest()) }()
+		synctest.Wait()
+
+		// The task service already moved the task to PAUSED and retired the
+		// attempt; the worker only has to stop.
+		if err := svc.PauseTask(t.Context(), 9); err != nil {
+			t.Fatalf("PauseTask() error = %v", err)
+		}
+		if err := <-done; err != nil {
+			t.Fatalf("RunAttempt() error = %v, want nil", err)
+		}
+
+		if got := attempts.count("complete") + attempts.count("fail") + attempts.count("release"); got != 0 {
+			t.Fatalf("calls = %v: a paused attempt must not report any outcome", attempts.log())
+		}
+		if got := svc.GetActiveTaskCount(t.Context()); got != 0 {
+			t.Fatalf("active tasks after pause = %d, want 0", got)
+		}
+	})
+}
+
+func TestRunAttempt_WorkerShutdownReleasesInsteadOfFailing(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		dl := &blockingDownloader{started: make(chan struct{}, 1), release: make(chan struct{})}
+		attempts := &fakeAttempts{generation: 1}
+		svc := NewService(&fakeStorage{}, &busSpy{}, WithAttempts(attempts, "worker-1"))
+		svc.RegisterDownloader("HTTP", dl)
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() { done <- svc.RunAttempt(ctx, attemptRequest()) }()
+		synctest.Wait()
+
+		cancel() // the worker process shuts down
+		if err := <-done; err != nil {
+			t.Fatalf("RunAttempt() error = %v, want nil: the release was recorded", err)
+		}
+
+		if got := attempts.count("release"); got != 1 {
+			t.Fatalf("calls = %v, want one release", attempts.log())
+		}
+		if got := attempts.count("fail") + attempts.count("complete"); got != 0 {
+			t.Fatalf("calls = %v: a shutdown must not spend a retry or force a result", attempts.log())
+		}
+	})
+}
+
+func TestRunAttempt_QueuedTaskIsNotClaimedAndDuplicatesAreDropped(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		dl := &blockingDownloader{started: make(chan struct{}, 2), release: release}
+		attempts := &fakeAttempts{generation: 1}
+		svc := NewService(&fakeStorage{}, &busSpy{}, WithAttempts(attempts, "worker-1"), WithMaxConcurrent(1))
+		svc.RegisterDownloader("HTTP", dl)
+
+		running := attemptRequest()
+		queued := attemptRequest()
+		queued.TaskID = 10
+		done := make(chan error, 2)
+		go func() { done <- svc.RunAttempt(t.Context(), running) }()
+		synctest.Wait()
+		go func() { done <- svc.RunAttempt(t.Context(), queued) }()
+		synctest.Wait()
+
+		if got := attempts.count("claim"); got != 1 {
+			t.Fatalf("claims = %d, want 1: a task waiting for a slot must stay unclaimed", got)
+		}
+		// The reconciler may dispatch both tasks again while this worker
+		// still holds them.
+		for _, req := range []TaskRequest{running, queued} {
+			if err := svc.RunAttempt(t.Context(), req); err != nil {
+				t.Fatalf("duplicate RunAttempt(%d) error = %v, want nil (dropped)", req.TaskID, err)
+			}
+		}
+		if got := attempts.count("claim"); got != 1 {
+			t.Fatalf("claims after the duplicates = %d, want 1", got)
+		}
+
+		close(release)
+		for range 2 {
+			if err := <-done; err != nil {
+				t.Fatalf("RunAttempt() error = %v", err)
+			}
+		}
+		if got := attempts.count("claim"); got != 2 {
+			t.Fatalf("claims = %d, want 2: the queued task claims once it has a slot", got)
+		}
+		if got := attempts.count("complete"); got != 2 {
+			t.Fatalf("calls = %v, want two completions", attempts.log())
+		}
+	})
+}
+
+// sizedStorage reads exactly the announced number of bytes, like a backend
+// that uploads with a known content length. It never reads io.EOF.
+type sizedStorage struct{ fakeStorage }
+
+func (s *sizedStorage) Store(_ context.Context, _ string, reader io.Reader, metadata *storage.FileMetadata) error {
+	_, err := io.CopyN(io.Discard, reader, metadata.FileSize)
+	return err
+}
+
+func TestRunAttempt_StoringStepIsReportedEvenWhenTheBackendNeverReadsEOF(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		attempts := &fakeAttempts{generation: 1}
+		svc := NewService(&sizedStorage{}, &busSpy{}, WithAttempts(attempts, "worker-1"))
+		svc.RegisterDownloader("HTTP", &fakeDownloader{})
+
+		if err := svc.RunAttempt(t.Context(), attemptRequest()); err != nil {
+			t.Fatalf("RunAttempt() error = %v", err)
+		}
+
+		storing, complete := attempts.first("storing"), attempts.first("complete")
+		if storing == -1 || complete == -1 || storing > complete {
+			t.Fatalf("calls = %v, want the storing step reported before the completion", attempts.log())
+		}
+	})
+}
+
+func TestRunAttempt_WithoutAttemptAPIIsAnError(t *testing.T) {
+	svc := NewService(&fakeStorage{}, &busSpy{})
+	svc.RegisterDownloader("HTTP", &fakeDownloader{})
+
+	err := svc.RunAttempt(t.Context(), attemptRequest())
+
+	if !apperrors.IsError(err, apperrors.ErrCodeInternal) {
+		t.Fatalf("RunAttempt() error = %v, want INTERNAL", err)
+	}
+}
