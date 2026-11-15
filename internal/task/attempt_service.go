@@ -226,6 +226,12 @@ func (s *attemptService) CompleteAttempt(
 			Message: "storage key is required to complete an attempt",
 		}
 	}
+	if result.StorageType == "" {
+		return &errors.Error{
+			Code:    errors.ErrCodeInvalidInput,
+			Message: "storage type is required to complete an attempt",
+		}
+	}
 
 	return s.transition(ctx, taskID, func(ctx context.Context, st *AttemptState) (bool, error) {
 		now := s.now()

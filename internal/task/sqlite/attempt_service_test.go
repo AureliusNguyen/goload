@@ -365,6 +365,19 @@ func TestCompleteAttempt_RequiresStorageKey(t *testing.T) {
 	require.Equal(t, task.StatusStoring, f.state(t, id).Status)
 }
 
+func TestCompleteAttempt_RequiresStorageType(t *testing.T) {
+	f := newAttemptFixture(t)
+	id := f.newTask(t)
+	attempt := f.claimStoring(t, id, "worker-a")
+	result := attemptResult(id, attempt.Generation)
+	result.StorageType = ""
+
+	err := f.svc.CompleteAttempt(context.Background(), id, "worker-a", attempt.Generation, result)
+
+	require.True(t, apperrors.IsError(err, apperrors.ErrCodeInvalidInput))
+	require.Equal(t, task.StatusStoring, f.state(t, id).Status)
+}
+
 // T3 at the API level: worker-a is alive but blocked from renewing; worker-b
 // claims a new generation and completes; then worker-a wakes up.
 func TestFencing_StaleWorkerCannotTouchWinnersResult(t *testing.T) {
