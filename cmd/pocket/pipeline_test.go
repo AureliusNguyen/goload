@@ -24,15 +24,33 @@ import (
 	"github.com/yuisofull/goload/internal/task"
 	tasksqlite "github.com/yuisofull/goload/internal/task/sqlite"
 	tasktransport "github.com/yuisofull/goload/internal/task/transport"
+	"github.com/yuisofull/goload/pkg/message"
 	"github.com/yuisofull/goload/pkg/message/inmem"
 )
 
 // scriptedDownloader serves a fixed body. Its first failInfo GetFileInfo calls
 // fail, which fails those attempts as a whole before any download starts.
+//
+// With hold set it is blockable: Download signals entered, then waits until
+// hold is closed (it proceeds) or its context ends (it returns the context
+// error), so a test can keep a worker mid-download.
 type scriptedDownloader struct {
 	body     string
 	failInfo atomic.Int32
 	starts   atomic.Int32
+
+	hold    chan struct{}
+	entered chan struct{}
+}
+
+// newBlockableDownloader returns a downloader whose Download blocks until the
+// test closes hold.
+func newBlockableDownloader(body string) *scriptedDownloader {
+	return &scriptedDownloader{
+		body:    body,
+		hold:    make(chan struct{}),
+		entered: make(chan struct{}, 1),
+	}
 }
 
 func (d *scriptedDownloader) GetFileInfo(
@@ -51,12 +69,23 @@ func (d *scriptedDownloader) GetFileInfo(
 }
 
 func (d *scriptedDownloader) Download(
-	context.Context,
-	string,
-	*download.AuthConfig,
-	download.DownloadOptions,
+	ctx context.Context,
+	_ string,
+	_ *download.AuthConfig,
+	_ download.DownloadOptions,
 ) (io.ReadCloser, int64, error) {
 	d.starts.Add(1)
+	if d.hold != nil {
+		select {
+		case d.entered <- struct{}{}:
+		default:
+		}
+		select {
+		case <-d.hold:
+		case <-ctx.Done():
+			return nil, 0, ctx.Err()
+		}
+	}
 	return io.NopCloser(strings.NewReader(d.body)), int64(len(d.body)), nil
 }
 
@@ -71,15 +100,64 @@ type pocketPipeline struct {
 	attempts task.AttemptRepository
 	outbox   task.OutboxRepository
 	store    *storage.Local
+
+	// Crash-recovery harness.
+	pool      *sqlitex.Pool
+	pub       message.Publisher
+	reconcile task.ReconcileRepository
+	// rawAttempts is the real ownership API, never gated.
+	rawAttempts task.AttemptService
+	// gate sits between the worker and rawAttempts when pipelineOpts.gated.
+	gate     *attemptGate
+	dataDir  string
+	workerID string
+
+	stopWorker  context.CancelFunc
+	stopControl context.CancelFunc
+	running     sync.WaitGroup // worker goroutines
+	control     sync.WaitGroup // lifecycle consumer, relay, reconciler
+}
+
+// pipelineOpts customises a pipeline for the crash-recovery tests. The zero
+// value is the plain pocket pipeline on a fresh temp database and the real
+// clock.
+type pipelineOpts struct {
+	// dbPath and dataDir let two pipelines share one SQLite file and one
+	// object store, which is what crash + restart means.
+	dbPath, dataDir string
+	workerID        string
+	// clock and lease make lease expiry deterministic. Nil clock is the real
+	// one; zero lease is the default.
+	clock func() time.Time
+	lease time.Duration
+	// noReconciler leaves the reconciler out.
+	noReconciler bool
+	// gated routes the worker's ownership calls through an attemptGate.
+	gated bool
 }
 
 func startPocketPipeline(t *testing.T, dl download.Downloader) *pocketPipeline {
 	t.Helper()
+	return startPipeline(t, dl, pipelineOpts{})
+}
 
-	pool, err := sqlitex.Open(filepath.Join(t.TempDir(), "pocket_pipeline.db"), 0, 10)
+func startPipeline(t *testing.T, dl download.Downloader, o pipelineOpts) *pocketPipeline {
+	t.Helper()
+
+	if o.dbPath == "" {
+		o.dbPath = filepath.Join(t.TempDir(), "pocket_pipeline.db")
+	}
+	if o.dataDir == "" {
+		o.dataDir = filepath.Join(t.TempDir(), "data")
+	}
+	if o.workerID == "" {
+		o.workerID = "worker-test"
+	}
+
+	pool, err := sqlitex.Open(o.dbPath, 0, 10)
 	require.NoError(t, err)
 	require.NoError(t, runMigrations(pool))
-	store, err := storage.NewLocalBackend(filepath.Join(t.TempDir(), "data"))
+	store, err := storage.NewLocalBackend(o.dataDir)
 	require.NoError(t, err)
 
 	logger := log.NewNopLogger()
@@ -91,43 +169,90 @@ func startPocketPipeline(t *testing.T, dl download.Downloader) *pocketPipeline {
 	attemptRepo := tasksqlite.NewAttemptRepo(pool)
 	reconcileRepo := tasksqlite.NewReconcileRepo(pool)
 
+	attemptOpts := []task.AttemptServiceOption{
+		task.WithRetryBackoff(func(int) time.Duration { return 20 * time.Millisecond }),
+	}
+	reconcilerOpts := []task.ReconcilerOption{task.WithReconcileInterval(20 * time.Millisecond)}
+	if o.clock != nil {
+		attemptOpts = append(attemptOpts, task.WithAttemptClock(o.clock))
+		reconcilerOpts = append(reconcilerOpts, task.WithReconcilerClock(o.clock))
+	}
+	if o.lease > 0 {
+		attemptOpts = append(attemptOpts, task.WithLeaseDuration(o.lease))
+	}
+
 	// Mirror the pocket binary: the in-memory bus drops a message with no
 	// subscriber, so outbox delivery must wait for the download consumer.
 	taskPub := task.NewEventPublisher(pub, task.WithOutboxTransport(task.NewRequireSubscriberTransport(pub)))
 	relay := task.NewOutboxRelay(outboxRepo, taskPub, task.WithOutboxPollInterval(10*time.Millisecond))
 	taskSvc := task.NewService(taskRepo, *taskPub, tx, outboxRepo, attemptRepo)
-	attemptSvc := task.NewAttemptService(attemptRepo, tx, outboxRepo,
-		task.WithRetryBackoff(func(int) time.Duration { return 20 * time.Millisecond }))
-	reconciler := task.NewReconciler(reconcileRepo, taskRepo, outboxRepo,
-		task.WithReconcileInterval(20*time.Millisecond))
+	attemptSvc := task.NewAttemptService(attemptRepo, tx, outboxRepo, attemptOpts...)
+	reconciler := task.NewReconciler(reconcileRepo, taskRepo, outboxRepo, reconcilerOpts...)
 	lifecycle := tasktransport.NewEventConsumer(taskSvc, sub, func(context.Context, error) {})
+
+	p := &pocketPipeline{
+		tasks:       taskSvc,
+		attempts:    attemptRepo,
+		outbox:      outboxRepo,
+		store:       store,
+		pool:        pool,
+		pub:         pub,
+		reconcile:   reconcileRepo,
+		rawAttempts: attemptSvc,
+		dataDir:     o.dataDir,
+		workerID:    o.workerID,
+	}
+	workerAttempts := attemptSvc
+	if o.gated {
+		p.gate = &attemptGate{inner: attemptSvc}
+		workerAttempts = p.gate
+	}
 
 	dlSvc := download.NewService(
 		store,
 		download.NewDownloadEventPublisher(pub),
 		download.WithStorageType(storage.TypeLocal),
-		download.WithAttempts(attemptSvc, "worker-test"),
+		download.WithAttempts(workerAttempts, o.workerID),
 	)
 	dlSvc.RegisterDownloader("HTTPS", dl)
 	worker := downloadtransport.NewEventConsumer(dlSvc, sub, logger, downloadtransport.WithAttemptRunner(dlSvc))
 
-	ctx, cancel := context.WithCancel(context.Background())
-	var running sync.WaitGroup
-	for _, run := range []func(context.Context) error{lifecycle.Start, worker.Start, relay.Run, reconciler.Run} {
-		running.Add(1)
+	workerCtx, stopWorker := context.WithCancel(context.Background())
+	controlCtx, stopControl := context.WithCancel(context.Background())
+	p.stopWorker, p.stopControl = stopWorker, stopControl
+
+	controlRuns := []func(context.Context) error{lifecycle.Start, relay.Run}
+	if !o.noReconciler {
+		controlRuns = append(controlRuns, reconciler.Run)
+	}
+	for _, run := range controlRuns {
+		p.control.Add(1)
 		go func() {
-			defer running.Done()
-			_ = run(ctx)
+			defer p.control.Done()
+			_ = run(controlCtx)
 		}()
 	}
+	p.running.Add(1)
+	go func() {
+		defer p.running.Done()
+		_ = worker.Start(workerCtx)
+	}()
+
 	t.Cleanup(func() {
-		cancel()
-		running.Wait()
+		p.stopAll()
 		_ = store.Close()
 		_ = pool.Close()
 	})
+	return p
+}
 
-	return &pocketPipeline{tasks: taskSvc, attempts: attemptRepo, outbox: outboxRepo, store: store}
+// stopAll cancels every goroutine of the pipeline and waits for them. It is
+// safe to call more than once.
+func (p *pocketPipeline) stopAll() {
+	p.stopWorker()
+	p.stopControl()
+	p.running.Wait()
+	p.control.Wait()
 }
 
 // create stores a task the way the HTTP API does.
