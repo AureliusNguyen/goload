@@ -1,0 +1,590 @@
+@import url("https://fonts.googleapis.com/css2?family=Dela+Gothic+One&family=JetBrains+Mono:wght@400;700&family=Zen+Kaku+Gothic+New:wght@400;500;700;900&display=swap");
+
+/*
+ * Chat workspace theme, used by the /app route only.
+ *
+ * Scope rule: every selector in this file starts with .chat-theme, so nothing
+ * here can restyle /, /dashboard, NotFound or the shared dialogs.
+ * Enforced by src/test/chat/themeScope.test.ts.
+ * Plain CSS only: no @layer, no @apply, no nesting.
+ */
+
+/* 1. Tokens */
+.chat-theme {
+  /* Spec palette. These hex values are the source of truth. */
+  --chat-ink: #120B0A;
+  --chat-ash: #EAE7E6;
+  --chat-red: #D7261E;
+  --chat-scale: #8E1A14;
+  --chat-ember: #FFC21A;
+
+  /* The one shared shear angle. Every cut, edge and texture derives from it. */
+  --chat-tilt: -6deg;
+  --chat-slope: calc(tan(var(--chat-tilt)) * -1);
+  --chat-cut-w: 96px;
+  --chat-cut-h: calc(var(--chat-cut-w) * var(--chat-slope));
+
+  --chat-edge: 3px;
+  --chat-shadow: 6px 6px 0 0 var(--chat-red);
+  --chat-shadow-ember: 4px 4px 0 0 var(--chat-ember);
+
+  --chat-font-display: "Dela Gothic One", "Zen Kaku Gothic New", sans-serif;
+  --chat-font-body: "Zen Kaku Gothic New", system-ui, sans-serif;
+  --chat-font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  /* shadcn tokens for this subtree only. HSL channel triplets, because
+     tailwind.config.ts wraps each one in hsl(). */
+  --background: 7.5 28.6% 5.5%;
+  --foreground: 15 8.7% 91%;
+  --card: 8 24% 9%;
+  --card-foreground: 15 8.7% 91%;
+  --popover: 8 24% 9%;
+  --popover-foreground: 15 8.7% 91%;
+  --primary: 2.6 75.5% 48%;
+  --primary-foreground: 0 0% 98%;
+  --primary-glow: 2.6 75.5% 48%;
+  --primary-soft: 3 75.3% 31.8%;
+  --primary-soft-foreground: 15 8.7% 91%;
+  --secondary: 3 75.3% 31.8%;
+  --secondary-foreground: 15 8.7% 91%;
+  --muted: 8 18% 13%;
+  --muted-foreground: 30 10% 66%;
+  --accent: 44 100% 55.1%;
+  --accent-foreground: 7.5 28.6% 5.5%;
+  --destructive: 2.6 75.5% 48%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 15 8.7% 91%;
+  --input: 15 8.7% 91%;
+  --ring: 44 100% 55.1%;
+  /* Needs the unit: tailwind.config.ts computes calc(var(--radius) - 8px). */
+  --radius: 0px;
+
+  background-color: var(--chat-ink);
+  color: var(--chat-ash);
+  font-family: var(--chat-font-body);
+  font-feature-settings: normal;
+  letter-spacing: 0;
+  color-scheme: dark;
+}
+
+/* 2. Zero radius for the whole subtree (also beats rounded-full and rounded-xl). */
+.chat-theme,
+.chat-theme *,
+.chat-theme *::before,
+.chat-theme *::after {
+  border-radius: 0 !important;
+}
+
+/* 3. Type */
+.chat-theme .chat-display {
+  font-family: var(--chat-font-display);
+  font-weight: 400;
+  line-height: 1.05;
+}
+.chat-theme .chat-mono {
+  font-family: var(--chat-font-mono);
+}
+.chat-theme ::selection {
+  background: #FFC21A;
+  color: #120B0A;
+}
+
+/* 4. Focus: an outline, so a hard shadow (box-shadow) can never replace it.
+      Nothing focusable is ever clipped or sits inside a clipped element. */
+.chat-theme :is(a, button, input, textarea, select, summary, [tabindex]):focus-visible {
+  outline: 3px solid var(--chat-ember);
+  outline-offset: 3px;
+}
+
+/* 5. Decoration layers. The ONLY rules that may skew, rotate or clip.
+      A layer is an aria-hidden span behind the content of a .chat-surface.
+      Geometry for a specific layer goes in a named class in this file, not in
+      Tailwind utilities: this base rule outranks single-class utilities. */
+.chat-theme .chat-surface {
+  position: relative;
+  isolation: isolate;
+}
+.chat-theme [data-chat-decor] {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  --decor-fill: var(--chat-ink);
+  --decor-edge: var(--chat-ash);
+  --decor-shadow: none;
+}
+.chat-theme [data-chat-decor][data-tone="card"] {
+  --decor-fill: hsl(var(--card));
+}
+.chat-theme [data-chat-decor][data-tone="red"] {
+  --decor-fill: var(--chat-red);
+}
+.chat-theme [data-chat-decor][data-tone="scale"] {
+  --decor-fill: var(--chat-scale);
+}
+.chat-theme [data-chat-decor][data-tone="ember"] {
+  --decor-fill: var(--chat-ember);
+  --decor-edge: var(--chat-ink);
+}
+.chat-theme [data-chat-decor][data-tone="ash"] {
+  --decor-fill: var(--chat-ash);
+  --decor-edge: var(--chat-ink);
+}
+.chat-theme [data-chat-decor][data-shadow="red"] {
+  --decor-shadow: var(--chat-shadow);
+}
+.chat-theme [data-chat-decor][data-shadow="ember"] {
+  --decor-shadow: var(--chat-shadow-ember);
+}
+
+/* plate: a sheared parallelogram. For short, fixed-height things only
+   (buttons, list items, chips, the sidebar backdrop). */
+.chat-theme [data-chat-decor="plate"] {
+  transform: skewX(var(--chat-tilt));
+  background: var(--decor-fill);
+  border: var(--chat-edge) solid var(--decor-edge);
+  box-shadow: var(--decor-shadow);
+}
+
+/* panel: a rectangle with two corners cut on the tilt slope. For tall reading
+   boxes, where a full shear would push text outside the shape. The hard
+   shadow is a drop-shadow so it follows the cut corners. */
+.chat-theme [data-chat-decor="panel"] {
+  filter: drop-shadow(6px 6px 0 var(--chat-red));
+}
+.chat-theme [data-chat-decor="panel"]::before,
+.chat-theme [data-chat-decor="panel"]::after {
+  content: "";
+  position: absolute;
+  clip-path: polygon(
+    0 var(--chat-cut-h),
+    var(--chat-cut-w) 0,
+    100% 0,
+    100% calc(100% - var(--chat-cut-h)),
+    calc(100% - var(--chat-cut-w)) 100%,
+    0 100%
+  );
+}
+.chat-theme [data-chat-decor="panel"]::before {
+  inset: 0;
+  background: var(--decor-edge);
+}
+.chat-theme [data-chat-decor="panel"]::after {
+  inset: var(--chat-edge);
+  background: var(--decor-fill);
+}
+
+/* spike: the loud zigzag edge. At most one on screen. */
+.chat-theme [data-chat-decor="spike"] {
+  background: var(--decor-fill);
+  clip-path: polygon(
+    0 14%, 5% 0, 13% 11%, 22% 1%, 33% 12%, 45% 0, 56% 10%, 68% 2%, 79% 12%, 90% 0, 100% 13%,
+    100% 88%, 93% 100%, 82% 89%, 71% 100%, 59% 90%, 47% 100%, 35% 88%, 23% 100%, 11% 90%, 0 100%
+  );
+}
+
+/* textures */
+.chat-theme [data-chat-decor="halftone"] {
+  --decor-dot: var(--chat-red);
+  background-image: radial-gradient(
+    color-mix(in srgb, var(--decor-dot) 75%, transparent) 1.3px,
+    transparent 1.7px
+  );
+  background-size: 8px 8px;
+}
+.chat-theme [data-chat-decor="halftone"][data-tone="ember"] {
+  --decor-dot: var(--chat-ember);
+  opacity: 0.35;
+}
+.chat-theme [data-chat-decor="speedlines"] {
+  background-image: repeating-linear-gradient(
+    calc(90deg - var(--chat-tilt)),
+    transparent 0 16px,
+    color-mix(in srgb, var(--chat-ash) 9%, transparent) 16px 17px
+  );
+}
+
+/* 6. Buttons. The element stays an unclipped rectangle (hit area and focus
+      outline); the sheared plate is a child layer. */
+.chat-theme .chat-btn,
+.chat-theme .chat-btn:hover {
+  background: transparent;
+  color: var(--chat-ash);
+}
+.chat-theme .chat-btn {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 8px 16px;
+  font-weight: 700;
+}
+.chat-theme .chat-btn[data-tone="red"],
+.chat-theme .chat-btn[data-tone="red"]:hover,
+.chat-theme .chat-btn[data-tone="scale"],
+.chat-theme .chat-btn[data-tone="scale"]:hover {
+  color: hsl(var(--primary-foreground));
+}
+.chat-theme .chat-btn[data-tone="ember"],
+.chat-theme .chat-btn[data-tone="ember"]:hover,
+.chat-theme .chat-btn[data-tone="ash"],
+.chat-theme .chat-btn[data-tone="ash"]:hover {
+  color: var(--chat-ink);
+}
+.chat-theme .chat-btn [data-chat-decor="plate"] {
+  transition: translate 80ms ease-out, box-shadow 80ms ease-out;
+}
+.chat-theme .chat-btn:hover [data-chat-decor="plate"] {
+  translate: -1px -1px;
+}
+.chat-theme .chat-btn:active [data-chat-decor="plate"] {
+  translate: 3px 3px;
+  box-shadow: none;
+}
+.chat-theme .chat-btn:disabled {
+  color: hsl(var(--muted-foreground));
+  opacity: 1;
+}
+.chat-theme .chat-btn:disabled [data-chat-decor="plate"] {
+  --decor-fill: hsl(var(--muted));
+  --decor-edge: hsl(var(--muted-foreground));
+  --decor-shadow: none;
+}
+
+/* 7. Workspace layout. Height follows the visual viewport so the phone
+      keyboard cannot cover the composer (see use-visual-viewport.ts). */
+.chat-theme.chat-root {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: var(--chat-vv-top, 0px);
+  height: var(--chat-vvh, 100dvh);
+  overflow: hidden;
+}
+.chat-theme .chat-header {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 16px;
+}
+.chat-theme .chat-header-lines {
+  opacity: 0.9;
+}
+.chat-theme .chat-brand {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  min-height: 44px;
+  padding: 6px 18px;
+  color: hsl(var(--primary-foreground));
+  font-size: 1.25rem;
+  text-decoration: none;
+}
+.chat-theme .chat-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 1rem;
+  font-weight: 700;
+}
+.chat-theme .chat-preview-note {
+  flex: none;
+  margin: 0 0 0 auto;
+  font-size: 0.6875rem;
+  color: hsl(var(--muted-foreground));
+}
+.chat-theme .chat-body {
+  container-type: size;
+}
+
+/* 8. Sidebar. Its backdrop is one big plate whose right edge is the diagonal
+      divider. Do not set display here: the element uses hidden md:flex. */
+.chat-theme .chat-sidebar {
+  position: relative;
+  isolation: isolate;
+  z-index: 1;
+  flex: none;
+  flex-direction: column;
+  width: 18rem;
+  padding: 16px 12px 16px 16px;
+}
+.chat-theme .chat-sidebar-plate {
+  inset: 0 0 0 -8rem;
+  transform-origin: bottom right;
+  border-width: 0 var(--chat-edge) 0 0;
+}
+.chat-theme .chat-main {
+  position: relative;
+  isolation: isolate;
+}
+@media (min-width: 768px) {
+  /* Clear the wedge the sidebar plate leans into. 100cqh is the body height. */
+  .chat-theme .chat-main {
+    padding-left: calc(100cqh * var(--chat-slope));
+  }
+}
+/* The restrained ember tint: halftone dots inside the wedge triangle. */
+.chat-theme [data-chat-decor].chat-wedge-tint {
+  inset: 0 auto 0 0;
+  width: calc(100cqh * var(--chat-slope));
+  clip-path: polygon(100% 0, 0 100%, 100% 100%);
+}
+.chat-theme .chat-nav {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+}
+.chat-theme .chat-new {
+  justify-content: flex-start;
+  gap: 8px;
+}
+.chat-theme .chat-nav-list {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  margin: 0;
+  padding: 8px;
+  list-style: none;
+}
+.chat-theme .chat-nav-item {
+  width: 100%;
+  justify-content: flex-start;
+  gap: 10px;
+  padding-left: 26px;
+  text-align: left;
+}
+.chat-theme .chat-nav-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-theme .chat-nav-state {
+  flex: none;
+  font-size: 0.6875rem;
+  color: hsl(var(--muted-foreground));
+}
+.chat-theme [data-chat-decor].chat-active-marker {
+  inset: 8px auto 8px 8px;
+  z-index: 0;
+  width: 8px;
+  border: 0;
+}
+
+/* 9. Thread and message panels */
+.chat-theme .chat-thread {
+  min-width: 0;
+}
+.chat-theme .chat-empty {
+  padding: 8px 0;
+}
+.chat-theme .chat-scroll {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--chat-red) transparent;
+}
+.chat-theme .chat-kicker {
+  margin: 0;
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  color: hsl(var(--muted-foreground));
+}
+.chat-theme .chat-empty-title {
+  margin: 0;
+  font-size: clamp(2rem, 6vw, 3.5rem);
+}
+.chat-theme .chat-empty-lede {
+  margin: 0;
+  max-width: 34rem;
+  color: hsl(var(--muted-foreground));
+}
+.chat-theme .chat-suggestion {
+  justify-content: flex-start;
+  text-align: left;
+  white-space: normal;
+}
+.chat-theme .chat-panel {
+  width: fit-content;
+  max-width: min(42rem, 100%);
+  padding: 18px 20px 20px;
+}
+.chat-theme .chat-panel[data-role="user"] {
+  margin-left: auto;
+}
+.chat-theme .chat-panel[data-role="assistant"] {
+  margin-right: auto;
+}
+.chat-theme .chat-panel-tab {
+  margin: 0 0 8px;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: hsl(var(--muted-foreground));
+}
+.chat-theme .chat-panel[data-role="user"] .chat-panel-tab {
+  color: var(--chat-ash);
+}
+.chat-theme .chat-panel-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  font-size: 1rem;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.chat-theme .chat-text {
+  margin: 0;
+  white-space: pre-wrap;
+}
+.chat-theme .chat-code {
+  min-width: 0;
+  margin: 0;
+  border: 2px solid var(--chat-ash);
+  background: var(--chat-ink);
+}
+.chat-theme .chat-code figcaption {
+  padding: 4px 10px;
+  border-bottom: 2px solid var(--chat-ash);
+  font-size: 0.6875rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: hsl(var(--muted-foreground));
+}
+.chat-theme .chat-code pre {
+  margin: 0;
+  padding: 12px 14px;
+  overflow-x: auto;
+  font-family: var(--chat-font-mono);
+  font-size: 0.875rem;
+  line-height: 1.6;
+  white-space: pre;
+  tab-size: 2;
+}
+.chat-theme [data-chat-caret] {
+  display: inline-block;
+  width: 0.6em;
+  height: 1.1em;
+  background: var(--chat-ash);
+  vertical-align: text-bottom;
+  animation: chat-caret-blink 1s steps(1) infinite;
+}
+@keyframes chat-caret-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+.chat-theme .chat-jump {
+  position: absolute;
+  right: 16px;
+  bottom: 12px;
+  gap: 8px;
+}
+
+/* 10. Composer */
+.chat-theme .chat-composer {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  max-width: 48rem;
+  margin: 0 auto;
+  padding: 8px 16px max(12px, env(safe-area-inset-bottom));
+}
+.chat-theme .chat-composer-box {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 10px 14px 12px 12px;
+}
+/* 16px text: anything smaller makes iOS zoom the page when the field is focused. */
+.chat-theme .chat-textarea {
+  min-height: 56px;
+  max-height: 160px;
+  padding: 8px;
+  resize: none;
+  border: 0;
+  background: transparent;
+  color: var(--chat-ash);
+  font-size: 1rem;
+  line-height: 1.5;
+  field-sizing: content;
+}
+.chat-theme .chat-composer-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+.chat-theme .chat-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-height: 108px;
+  margin: 0;
+  padding: 4px 8px;
+  overflow-y: auto;
+  list-style: none;
+}
+.chat-theme .chat-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 0 0 0 12px;
+  font-size: 0.8125rem;
+}
+.chat-theme .chat-chip-name {
+  min-width: 0;
+  max-width: 12rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-theme .chat-chip-state {
+  flex: none;
+  font-size: 0.6875rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: hsl(var(--muted-foreground));
+}
+.chat-theme .chat-composer-status {
+  min-height: 1.25rem;
+  margin: 0;
+  font-size: 0.75rem;
+  color: hsl(var(--muted-foreground));
+}
+.chat-theme .chat-composer[data-busy="true"] .chat-composer-status {
+  color: var(--chat-ash);
+}
+
+/* 11. Mobile drawer. Rendered in a Radix portal under body, so the element
+       itself carries .chat-theme. */
+.chat-theme.chat-drawer {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: min(20rem, 86vw);
+  padding: 16px;
+  border-right: var(--chat-edge) solid var(--chat-ash);
+  box-shadow: var(--chat-shadow);
+}
+
+/* 12. Reduced motion: no typing caret blink, no press transitions. The static
+       tilt stays. */
+@media (prefers-reduced-motion: reduce) {
+  .chat-theme *,
+  .chat-theme *::before,
+  .chat-theme *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
