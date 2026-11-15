@@ -91,7 +91,9 @@ func startPocketPipeline(t *testing.T, dl download.Downloader) *pocketPipeline {
 	attemptRepo := tasksqlite.NewAttemptRepo(pool)
 	reconcileRepo := tasksqlite.NewReconcileRepo(pool)
 
-	taskPub := task.NewEventPublisher(pub)
+	// Mirror the pocket binary: the in-memory bus drops a message with no
+	// subscriber, so outbox delivery must wait for the download consumer.
+	taskPub := task.NewEventPublisher(pub, task.WithOutboxTransport(task.NewRequireSubscriberTransport(pub)))
 	relay := task.NewOutboxRelay(outboxRepo, taskPub, task.WithOutboxPollInterval(10*time.Millisecond))
 	taskSvc := task.NewService(taskRepo, *taskPub, tx, outboxRepo, attemptRepo)
 	attemptSvc := task.NewAttemptService(attemptRepo, tx, outboxRepo,
