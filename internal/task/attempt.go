@@ -55,9 +55,15 @@ type AttemptState struct {
 
 	// Columns an attempt writes. Only complete attaches StorageType and
 	// StoragePath.
-	FileName     string
-	StorageType  storage.Type
-	StoragePath  string
+	FileName    string
+	StorageType storage.Type
+	StoragePath string
+	// ContentType is the committed result's content type.
+	ContentType string
+	// FileSize is the committed result's byte size. It is the result
+	// identity, distinct from Progress.TotalBytes and DownloadedBytes, which
+	// are live progress for display.
+	FileSize     int64
 	Checksum     *ChecksumInfo
 	Progress     DownloadProgress
 	ErrorMessage *string
@@ -233,17 +239,19 @@ func (st *AttemptState) renew(
 // result, so the comparison is strict: an omitted or changed FileName or
 // Checksum is a different result and does not match.
 //
-// FileSize and ContentType are intentionally not compared. ContentType is not
-// persisted on the task row, and FileSize is only stored as total_bytes, which
-// is unreliable as an idempotency key (a faithful FileSize==0 retry would be
-// falsely rejected). A real change to the bytes changes the Checksum, which is
-// compared. Comparing the full result identity is deferred to PR2b, where the
-// result is fully persisted.
+// The full result identity (StorageKey, StorageType, FileName, Checksum,
+// ContentType, FileSize) is persisted and compared. ContentType and FileSize
+// live in dedicated result columns written unconditionally by complete, not in
+// total_bytes (which is live progress gated on FileSize > 0), so a faithful
+// FileSize==0 retry stores and matches 0 and is not falsely rejected.
 func (st *AttemptState) matchesResult(result AttemptResult) bool {
 	if st.StoragePath != result.StorageKey || st.StorageType != result.StorageType {
 		return false
 	}
 	if st.FileName != result.FileName {
+		return false
+	}
+	if st.ContentType != result.ContentType || st.FileSize != result.FileSize {
 		return false
 	}
 	if (st.Checksum == nil) != (result.Checksum == nil) {
@@ -287,6 +295,9 @@ func (st *AttemptState) complete(
 	}
 	st.StorageType = result.StorageType
 	st.StoragePath = result.StorageKey
+	// Result identity: stored unconditionally (an empty file has FileSize 0).
+	st.ContentType = result.ContentType
+	st.FileSize = result.FileSize
 	if result.Checksum != nil {
 		checksum := *result.Checksum
 		st.Checksum = &checksum

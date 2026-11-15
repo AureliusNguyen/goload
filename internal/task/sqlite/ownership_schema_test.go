@@ -53,9 +53,11 @@ func TestEnsureOwnershipSchema_AddsColumnsAndIsIdempotent(t *testing.T) {
 	require.Equal(t, taskColumn{Type: "INTEGER", NotNull: true, Default: "0"}, columns["attempt_generation"])
 	require.Equal(t, taskColumn{Type: "INTEGER", NotNull: true, Default: "0"}, columns["retry_count"])
 	require.Equal(t, taskColumn{Type: "TEXT"}, columns["next_attempt_at"])
+	require.Equal(t, taskColumn{Type: "TEXT"}, columns["result_content_type"])
+	require.Equal(t, taskColumn{Type: "INTEGER", NotNull: true, Default: "0"}, columns["result_file_size"])
 	// The pre-existing columns are untouched.
 	require.Equal(t, taskColumn{Type: "TEXT", NotNull: true}, columns["status"])
-	require.Len(t, columns, 31, "26 original columns plus 5 ownership columns")
+	require.Len(t, columns, 33, "26 original columns plus 5 ownership columns plus 2 result columns")
 }
 
 func TestEnsureOwnershipSchema_UpgradesExistingRows(t *testing.T) {

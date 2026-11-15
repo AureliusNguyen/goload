@@ -501,6 +501,65 @@ func TestCompleteAttempt_RetryWithOtherGenerationOrResultIsRejected(t *testing.T
 	require.Len(t, f.unsent(t), 1)
 }
 
+func TestCompleteAttempt_PersistsResultIdentity(t *testing.T) {
+	f := newAttemptFixture(t)
+	id := f.newTask(t)
+	attempt := f.claimStoring(t, id, "worker-a")
+	result := attemptResult(id, attempt.Generation)
+
+	require.NoError(t, f.svc.CompleteAttempt(context.Background(), id, "worker-a", attempt.Generation, result))
+
+	st := f.state(t, id)
+	require.Equal(t, "application/octet-stream", st.ContentType)
+	require.Equal(t, int64(1000), st.FileSize)
+}
+
+func TestCompleteAttempt_RetryWithOtherContentTypeOrSizeIsRejected(t *testing.T) {
+	f := newAttemptFixture(t)
+	id := f.newTask(t)
+	ctx := context.Background()
+	attempt := f.claimStoring(t, id, "worker-a")
+	result := attemptResult(id, attempt.Generation)
+	require.NoError(t, f.svc.CompleteAttempt(ctx, id, "worker-a", attempt.Generation, result))
+	committed := f.state(t, id)
+
+	otherType := result
+	otherType.ContentType = "text/plain"
+	otherSize := result
+	otherSize.FileSize = result.FileSize + 1
+
+	require.ErrorIs(t, f.svc.CompleteAttempt(ctx, id, "worker-a", attempt.Generation, otherType), task.ErrAttemptRejected)
+	require.ErrorIs(t, f.svc.CompleteAttempt(ctx, id, "worker-a", attempt.Generation, otherSize), task.ErrAttemptRejected)
+	require.Equal(t, committed, f.state(t, id), "a rejected retry must not change the result")
+	require.Len(t, f.unsent(t), 1)
+
+	// The faithful retry is still accepted without a second event.
+	require.NoError(t, f.svc.CompleteAttempt(ctx, id, "worker-a", attempt.Generation, result))
+	require.Len(t, f.unsent(t), 1)
+}
+
+func TestCompleteAttempt_EmptyFileRetryIsIdempotent(t *testing.T) {
+	f := newAttemptFixture(t)
+	id := f.newTask(t)
+	ctx := context.Background()
+	attempt := f.claimStoring(t, id, "worker-a")
+	result := attemptResult(id, attempt.Generation)
+	result.FileSize = 0
+	require.NoError(t, f.svc.CompleteAttempt(ctx, id, "worker-a", attempt.Generation, result))
+	committed := f.state(t, id)
+	require.Equal(t, int64(0), committed.FileSize)
+
+	f.clock.Advance(time.Hour)
+	require.NoError(t, f.svc.CompleteAttempt(ctx, id, "worker-a", attempt.Generation, result))
+
+	require.Equal(t, committed, f.state(t, id))
+	require.Len(t, f.unsent(t), 1)
+
+	nonEmpty := result
+	nonEmpty.FileSize = 5
+	require.ErrorIs(t, f.svc.CompleteAttempt(ctx, id, "worker-a", attempt.Generation, nonEmpty), task.ErrAttemptRejected)
+}
+
 func TestFailAttempt_RetriesWithBackoffThenTerminal(t *testing.T) {
 	f := newAttemptFixture(t)
 	id := f.newTask(t) // max_retries 3

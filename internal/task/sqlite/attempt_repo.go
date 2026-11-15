@@ -25,14 +25,16 @@ const lockTaskRowSQL = `UPDATE tasks SET attempt_generation = attempt_generation
 
 const selectAttemptStateSQL = `SELECT status, owner_id, lease_expires_at, attempt_generation, retry_count, next_attempt_at,
        max_retries, file_name, storage_type, storage_path, checksum_type, checksum_value,
-       progress, downloaded_bytes, total_bytes, error_message, completed_at
+       progress, downloaded_bytes, total_bytes, error_message, completed_at,
+       result_content_type, result_file_size
 FROM tasks
 WHERE id = ?`
 
 const saveAttemptStateSQL = `UPDATE tasks
 SET status = ?, owner_id = ?, lease_expires_at = ?, attempt_generation = ?, retry_count = ?, next_attempt_at = ?,
     file_name = ?, storage_type = ?, storage_path = ?, checksum_type = ?, checksum_value = ?,
-    progress = ?, downloaded_bytes = ?, total_bytes = ?, error_message = ?, completed_at = ?
+    progress = ?, downloaded_bytes = ?, total_bytes = ?, error_message = ?, completed_at = ?,
+    result_content_type = ?, result_file_size = ?
 WHERE id = ?`
 
 type attemptRepo struct {
@@ -97,6 +99,7 @@ func (r *attemptRepo) SaveAttemptState(ctx context.Context, state *task.AttemptS
 			state.FileName, string(state.StorageType), state.StoragePath, checksumType, checksumValue,
 			state.Progress.Progress, state.Progress.DownloadedBytes, state.Progress.TotalBytes,
 			errorMessage, completedAt,
+			state.ContentType, state.FileSize,
 			state.TaskID,
 		},
 	})
@@ -142,7 +145,7 @@ func readAttemptState(conn *sqlite.Conn, taskID uint64) (*task.AttemptState, err
 // owner_id, lease_expires_at, attempt_generation, retry_count,
 // next_attempt_at, max_retries, file_name, storage_type, storage_path,
 // checksum_type, checksum_value, progress, downloaded_bytes, total_bytes,
-// error_message, completed_at.
+// error_message, completed_at, result_content_type, result_file_size.
 func scanAttemptState(stmt *sqlite.Stmt, taskID uint64) (*task.AttemptState, error) {
 	state := &task.AttemptState{
 		TaskID:     taskID,
@@ -156,6 +159,9 @@ func scanAttemptState(stmt *sqlite.Stmt, taskID uint64) (*task.AttemptState, err
 		// same value back.
 		StorageType: storage.Type(stmt.ColumnText(8)),
 		StoragePath: stmt.ColumnText(9),
+		// Result identity; a NULL content type reads as "".
+		ContentType: stmt.ColumnText(17),
+		FileSize:    stmt.ColumnInt64(18),
 		Progress: task.DownloadProgress{
 			Progress:        stmt.ColumnFloat(12),
 			DownloadedBytes: stmt.ColumnInt64(13),

@@ -20,6 +20,8 @@ var ownershipColumns = []struct {
 	{"attempt_generation", `ALTER TABLE tasks ADD COLUMN attempt_generation INTEGER NOT NULL DEFAULT 0;`},
 	{"retry_count", `ALTER TABLE tasks ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;`},
 	{"next_attempt_at", `ALTER TABLE tasks ADD COLUMN next_attempt_at TEXT;`},
+	{"result_content_type", `ALTER TABLE tasks ADD COLUMN result_content_type TEXT;`},
+	{"result_file_size", `ALTER TABLE tasks ADD COLUMN result_file_size INTEGER NOT NULL DEFAULT 0;`},
 }
 
 // EnsureOwnershipSchema adds the task ownership columns (owner, lease,
