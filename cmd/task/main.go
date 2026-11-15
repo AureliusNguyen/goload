@@ -233,9 +233,13 @@ func main() {
 		if err != nil {
 			level.Error(logger).Log("msg", "failed to create kafka subscriber for task service", "err", err)
 		} else {
+			// The download workers of this deployment still report through
+			// lifecycle events: they cannot reach the ownership API until it
+			// is exposed over gRPC. Remove WithLegacyStateWrites with that
+			// exposure.
 			taskEventConsumer = tasktransport.NewEventConsumer(svc, taskSub, func(ctx context.Context, err error) {
 				level.Error(logger).Log("msg", "task event consumer error", "err", err)
-			})
+			}, tasktransport.WithLegacyStateWrites())
 		}
 	}
 

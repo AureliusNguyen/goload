@@ -168,9 +168,11 @@ func main() {
 		task.WithTaskSourcePresigner(storageBackend),
 	)
 
+	// The download worker still reports through lifecycle events; the legacy
+	// writes go away when it claims tasks through the ownership API.
 	taskEventConsumer := tasktransport.NewEventConsumer(taskSvc, sub, func(_ context.Context, err error) {
 		level.Error(logger).Log("msg", "task event consumer error", "err", err)
-	})
+	}, tasktransport.WithLegacyStateWrites())
 
 	downloadPub := download.NewDownloadEventPublisher(pub)
 	dlSvc := download.NewService(

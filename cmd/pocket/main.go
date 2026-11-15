@@ -123,9 +123,11 @@ func main() {
 	// Task event consumer
 	var taskEventConsumer *tasktransport.EventConsumer
 	{
+		// The download worker still reports through lifecycle events; the
+		// legacy writes go away when it claims tasks through the ownership API.
 		taskEventConsumer = tasktransport.NewEventConsumer(taskSvc, sub, func(ctx context.Context, err error) {
 			level.Error(logger).Log("msg", "task event consumer error", "err", err)
-		})
+		}, tasktransport.WithLegacyStateWrites())
 	}
 
 	// Download service

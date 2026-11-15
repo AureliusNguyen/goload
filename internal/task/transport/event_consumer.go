@@ -11,11 +11,37 @@ import (
 	"github.com/yuisofull/goload/pkg/message"
 )
 
-// EventConsumer handles events from other services
+// EventConsumer receives the lifecycle events of download workers:
+// task.progress.updated, task.completed and task.failed.
+//
+// These events are notifications. The task row is written only by the
+// ownership API (task.AttemptService), whose calls are checked against the
+// attempt generation. An event on the bus carries no generation, so applying
+// it would let a stale attempt overwrite the winner. By default the consumer
+// therefore acknowledges every event and writes nothing. It stays subscribed
+// so that the outbox relay always finds a subscriber for the lifecycle events
+// it publishes.
 type EventConsumer struct {
 	taskService  task.Service
 	subscriber   message.Subscriber
 	errorHandler func(context.Context, error)
+	// legacyStateWrites re-enables the pre-ownership behavior: every event is
+	// applied to the task row without a fencing check.
+	legacyStateWrites bool
+}
+
+// EventConsumerOption configures an EventConsumer.
+type EventConsumerOption func(*EventConsumer)
+
+// WithLegacyStateWrites makes the consumer apply lifecycle events to the task
+// row, as it did before the ownership API existed.
+//
+// Legacy: this is the unfenced write path the ownership API replaces. It
+// exists only for cmd/task, whose download workers cannot reach the ownership
+// API until it is exposed over gRPC, and it goes away with that exposure. Do
+// not use it anywhere else.
+func WithLegacyStateWrites() EventConsumerOption {
+	return func(ec *EventConsumer) { ec.legacyStateWrites = true }
 }
 
 // NewEventConsumer creates a new event consumer for task service
@@ -23,12 +49,17 @@ func NewEventConsumer(
 	taskService task.Service,
 	subscriber message.Subscriber,
 	errorHandler func(context.Context, error),
+	opts ...EventConsumerOption,
 ) *EventConsumer {
-	return &EventConsumer{
+	ec := &EventConsumer{
 		taskService:  taskService,
 		subscriber:   subscriber,
 		errorHandler: errorHandler,
 	}
+	for _, o := range opts {
+		o(ec)
+	}
+	return ec
 }
 
 // Start begins consuming events
@@ -60,40 +91,35 @@ func (ec *EventConsumer) Start(ctx context.Context) error {
 
 // handleProgressUpdates processes progress update messages
 func (ec *EventConsumer) handleProgressUpdates(ctx context.Context, ch <-chan *message.Message) {
-	for msg := range ch {
-		if err := ec.handleTaskProgressUpdated(ctx, msg); err != nil {
-			if errors.IsError(err, errors.ErrCodeNotFound) {
-				msg.Ack()
-				continue
-			}
-			ec.errorHandler(ctx, err)
-			msg.Nack()
-		} else {
-			msg.Ack()
-		}
-	}
+	ec.consume(ctx, ch, ec.handleTaskProgressUpdated)
 }
 
 // handleCompletions processes completion messages
 func (ec *EventConsumer) handleCompletions(ctx context.Context, ch <-chan *message.Message) {
-	for msg := range ch {
-		if err := ec.handleTaskCompleted(ctx, msg); err != nil {
-			if errors.IsError(err, errors.ErrCodeNotFound) {
-				msg.Ack()
-				continue
-			}
-			ec.errorHandler(ctx, err)
-			msg.Nack()
-		} else {
-			msg.Ack()
-		}
-	}
+	ec.consume(ctx, ch, ec.handleTaskCompleted)
 }
 
 // handleFailures processes failure messages
 func (ec *EventConsumer) handleFailures(ctx context.Context, ch <-chan *message.Message) {
+	ec.consume(ctx, ch, ec.handleTaskFailed)
+}
+
+// consume acknowledges every message of one lifecycle topic. Only in legacy
+// mode it first applies the event to the task row.
+func (ec *EventConsumer) consume(
+	ctx context.Context,
+	ch <-chan *message.Message,
+	apply func(context.Context, *message.Message) error,
+) {
 	for msg := range ch {
-		if err := ec.handleTaskFailed(ctx, msg); err != nil {
+		if !ec.legacyStateWrites {
+			// A notification: the task service already committed whatever
+			// this event announces, under the attempt's generation.
+			msg.Ack()
+			continue
+		}
+
+		if err := apply(ctx, msg); err != nil {
 			if errors.IsError(err, errors.ErrCodeNotFound) {
 				msg.Ack()
 				continue
@@ -106,7 +132,7 @@ func (ec *EventConsumer) handleFailures(ctx context.Context, ch <-chan *message.
 	}
 }
 
-// handleTaskProgressUpdated processes progress updates from download service
+// handleTaskProgressUpdated applies a progress update (legacy mode only)
 func (ec *EventConsumer) handleTaskProgressUpdated(ctx context.Context, msg *message.Message) error {
 	var event events.TaskProgressUpdatedEvent
 	if err := json.Unmarshal(msg.Payload, &event); err != nil {
@@ -127,7 +153,7 @@ func (ec *EventConsumer) handleTaskProgressUpdated(ctx context.Context, msg *mes
 	return nil
 }
 
-// handleTaskCompleted processes task completion events from download service
+// handleTaskCompleted applies a completion event (legacy mode only)
 func (ec *EventConsumer) handleTaskCompleted(ctx context.Context, msg *message.Message) error {
 	var event events.TaskCompletedEvent
 	if err := json.Unmarshal(msg.Payload, &event); err != nil {
@@ -176,7 +202,7 @@ func (ec *EventConsumer) handleTaskCompleted(ctx context.Context, msg *message.M
 	return nil
 }
 
-// handleTaskFailed processes task failure events from download service
+// handleTaskFailed applies a failure event (legacy mode only)
 func (ec *EventConsumer) handleTaskFailed(ctx context.Context, msg *message.Message) error {
 	var event events.TaskFailedEvent
 	if err := json.Unmarshal(msg.Payload, &event); err != nil {
