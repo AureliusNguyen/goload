@@ -304,7 +304,7 @@ func TestOutboxRelay_Run_PollsUntilCancelled(t *testing.T) {
 func TestOutboxRelay_Inmem_WaitsForSubscriber(t *testing.T) {
 	outbox := seededOutbox(t, outboxEventFixture("evt-1", 42))
 	msgPub, msgSub := inmem.NewPublisherAndSubscriber(log.NewNopLogger())
-	relay := NewOutboxRelay(outbox, NewEventPublisher(msgPub))
+	relay := NewOutboxRelay(outbox, NewEventPublisher(msgPub, WithOutboxTransport(NewRequireSubscriberTransport(msgPub))))
 
 	// Pocket startup race: the relay runs before the download consumer has
 	// subscribed. The in-memory bus would drop the message, so it must stay

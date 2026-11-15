@@ -106,7 +106,9 @@ func main() {
 	}
 
 	// event publisher wrapper
-	dep := taskpkg.NewEventPublisher(pub)
+	// Kafka retains messages without a live consumer, so outbox delivery
+	// publishes unconditionally.
+	dep := taskpkg.NewEventPublisher(pub, taskpkg.WithOutboxTransport(taskpkg.NewRetainingTransport(pub)))
 
 	// Outbox relay: publishes the TaskCreated rows that CreateTask/RetryTask
 	// write in the task transaction, on the same Kafka topic as before.

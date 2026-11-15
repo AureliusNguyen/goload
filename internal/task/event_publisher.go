@@ -17,13 +17,37 @@ import (
 // Publisher publishes task-related events
 type Publisher struct {
 	publisher message.Publisher
+	outbox    OutboxTransport
+}
+
+// EventPublisherOption configures a Publisher.
+type EventPublisherOption func(*Publisher)
+
+// WithOutboxTransport sets the transport used to deliver outbox events, making
+// the "publish only when a subscriber exists" choice explicit at wiring time.
+// When it is not set, outbox events use a RetainingTransport over the same
+// publisher, which delivers unconditionally (the Kafka semantics).
+func WithOutboxTransport(t OutboxTransport) EventPublisherOption {
+	return func(ep *Publisher) {
+		if t != nil {
+			ep.outbox = t
+		}
+	}
 }
 
 // NewEventPublisher creates a new event publisher for task service
-func NewEventPublisher(publisher message.Publisher) *Publisher {
-	return &Publisher{
-		publisher: publisher,
+func NewEventPublisher(publisher message.Publisher, opts ...EventPublisherOption) *Publisher {
+	ep := &Publisher{publisher: publisher}
+	// Default outbox delivery retains without a subscriber (Kafka semantics).
+	// A nil publisher leaves no transport, so PublishOutboxEvent reports it
+	// rather than dereferencing nil.
+	if publisher != nil {
+		ep.outbox = NewRetainingTransport(publisher)
 	}
+	for _, o := range opts {
+		o(ep)
+	}
+	return ep
 }
 
 // PublishTaskStatusUpdated publishes a task status update event
@@ -157,17 +181,66 @@ func formatTaskID(taskID uint64) string {
 	return strconv.FormatUint(taskID, 10)
 }
 
-// ErrOutboxNoSubscribers is returned by PublishOutboxEvent when the transport
-// reports that nobody is subscribed to the destination topic yet.
+// ErrOutboxNoSubscribers is returned by an OutboxTransport that requires a live
+// subscriber when the destination topic has none yet. The relay keeps the row
+// unsent and republishes it on a later pass.
 var ErrOutboxNoSubscribers = errors.New("outbox: no subscribers on topic")
 
-// subscriberRequiringPublisher is implemented by a transport that publishes
-// only when a subscriber exists and reports the absence atomically (the
-// in-memory bus). Its only error means "no subscriber, message not
-// delivered". Kafka does not implement it: it retains messages without a
-// live consumer, so no check is needed.
-type subscriberRequiringPublisher interface {
+// OutboxTransport delivers a built outbox message on the underlying bus. It is
+// the explicit seam for the "publish only when a subscriber exists" contract:
+// an implementation either requires a subscriber (RequireSubscriberTransport)
+// or retains the message regardless (RetainingTransport). The task package
+// depends on this interface, not on a concrete transport or a runtime type
+// assertion, so every message.Publisher keeps the same semantics.
+type OutboxTransport interface {
+	// Deliver publishes msg on topic. It returns ErrOutboxNoSubscribers when
+	// the transport requires a live subscriber and none exists (the row must
+	// stay unsent); nil on a successful publish; any other error is a
+	// transport failure.
+	Deliver(topic string, msg *message.Message) error
+}
+
+// RequiringSubscriberPublisher is a transport that publishes only when a
+// subscriber exists and reports the absence atomically (the in-memory bus).
+type RequiringSubscriberPublisher interface {
 	PublishRequiringSubscriber(topic string, msgs ...*message.Message) error
+}
+
+// RequireSubscriberTransport adapts a RequiringSubscriberPublisher (the
+// in-memory bus) to OutboxTransport: Deliver returns ErrOutboxNoSubscribers
+// when the topic has no subscriber yet.
+type RequireSubscriberTransport struct {
+	pub RequiringSubscriberPublisher
+}
+
+// NewRequireSubscriberTransport builds a RequireSubscriberTransport.
+func NewRequireSubscriberTransport(pub RequiringSubscriberPublisher) *RequireSubscriberTransport {
+	return &RequireSubscriberTransport{pub: pub}
+}
+
+// Deliver implements OutboxTransport.
+func (t *RequireSubscriberTransport) Deliver(topic string, msg *message.Message) error {
+	if err := t.pub.PublishRequiringSubscriber(topic, msg); err != nil {
+		// The only error this returns is "no subscriber": keep the row unsent.
+		return fmt.Errorf("%w: %s", ErrOutboxNoSubscribers, topic)
+	}
+	return nil
+}
+
+// RetainingTransport adapts a message.Publisher that retains messages without a
+// live subscriber (Kafka) to OutboxTransport: Deliver always publishes.
+type RetainingTransport struct {
+	pub message.Publisher
+}
+
+// NewRetainingTransport builds a RetainingTransport.
+func NewRetainingTransport(pub message.Publisher) *RetainingTransport {
+	return &RetainingTransport{pub: pub}
+}
+
+// Deliver implements OutboxTransport.
+func (t *RetainingTransport) Deliver(topic string, msg *message.Message) error {
+	return t.pub.Publish(topic, msg)
 }
 
 // outboxTopic maps an outbox event type to the topic it is published on. The
@@ -187,8 +260,8 @@ func outboxTopic(eventType string) (string, bool) {
 // crash carries the same UUID. Delivery is at-least-once; consumers do not
 // dedupe on the UUID yet.
 func (ep *Publisher) PublishOutboxEvent(_ context.Context, event OutboxEvent) error {
-	if ep == nil || ep.publisher == nil {
-		return errors.New("outbox: no message publisher configured")
+	if ep == nil || ep.outbox == nil {
+		return errors.New("outbox: no transport configured")
 	}
 
 	topic, ok := outboxTopic(event.EventType)
@@ -205,12 +278,5 @@ func (ep *Publisher) PublishOutboxEvent(_ context.Context, event OutboxEvent) er
 		},
 	}
 
-	if rp, ok := ep.publisher.(subscriberRequiringPublisher); ok {
-		if err := rp.PublishRequiringSubscriber(topic, msg); err != nil {
-			// The only error this returns is "no subscriber": keep the row unsent.
-			return fmt.Errorf("%w: %s", ErrOutboxNoSubscribers, topic)
-		}
-		return nil
-	}
-	return ep.publisher.Publish(topic, msg)
+	return ep.outbox.Deliver(topic, msg)
 }

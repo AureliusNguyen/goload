@@ -149,7 +149,10 @@ func main() {
 
 	authMiddleware := apigateway.NewAuthMiddleware(authSvc)
 
-	taskPub := task.NewEventPublisher(pub)
+	// The in-memory bus drops a message with no subscriber, so outbox delivery
+	// must wait for the download consumer to subscribe: keep the row unsent
+	// until it does.
+	taskPub := task.NewEventPublisher(pub, task.WithOutboxTransport(task.NewRequireSubscriberTransport(pub)))
 	// Outbox relay: publishes the TaskCreated rows that CreateTask/RetryTask
 	// write in the task transaction, on the same in-memory bus as before.
 	outboxRelay := task.NewOutboxRelay(outboxRepo, taskPub, task.WithOutboxRelayLogger(logger))

@@ -118,7 +118,9 @@ func TestPublishOutboxEvent_NoTransportConfigured(t *testing.T) {
 
 func TestPublishOutboxEvent_InmemRequiresSubscriber(t *testing.T) {
 	msgPub, msgSub := inmem.NewPublisherAndSubscriber(log.NewNopLogger())
-	pub := NewEventPublisher(msgPub)
+	// The require-subscriber contract is wired explicitly, as the pocket
+	// binaries do, instead of being inferred from the publisher's type.
+	pub := NewEventPublisher(msgPub, WithOutboxTransport(NewRequireSubscriberTransport(msgPub)))
 	event := outboxEventFixture("evt-1", 42)
 
 	// Nobody listens yet: the in-memory bus would drop the message.
