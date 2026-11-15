@@ -17,6 +17,7 @@ import (
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/go-llsqlite/crawshaw/sqlitex"
+	"github.com/google/uuid"
 	"github.com/oklog/run"
 
 	"github.com/yuisofull/goload/internal/apigateway"
@@ -86,6 +87,7 @@ func main() {
 	tx := tasksqlite.NewTxManager(pool)
 	outboxRepo := tasksqlite.NewOutboxRepo(pool)
 	attemptRepo := tasksqlite.NewAttemptRepo(pool)
+	reconcileRepo := tasksqlite.NewReconcileRepo(pool)
 
 	// Password hasher
 	bcryptHasher := bcrypt.NewHasher(10)
@@ -120,14 +122,22 @@ func main() {
 		task.WithTaskSourcePresigner(storageBackend),
 	)
 
-	// Task event consumer
+	// Ownership API: the download worker claims every task through it, renews
+	// the lease while it runs and commits the result under the generation of
+	// its claim. workerID identifies this process as the owner.
+	attemptSvc := task.NewAttemptService(attemptRepo, tx, outboxRepo)
+	workerID := uuid.NewString()
+	// Reconciler: dispatches due PENDING tasks and attempts whose lease
+	// expired again. This is what recovers work after a crash.
+	reconciler := task.NewReconciler(reconcileRepo, taskRepo, outboxRepo, task.WithReconcilerLogger(logger))
+
+	// Task event consumer: lifecycle events are notifications only; the task
+	// row is written through the ownership API.
 	var taskEventConsumer *tasktransport.EventConsumer
 	{
-		// The download worker still reports through lifecycle events; the
-		// legacy writes go away when it claims tasks through the ownership API.
 		taskEventConsumer = tasktransport.NewEventConsumer(taskSvc, sub, func(ctx context.Context, err error) {
 			level.Error(logger).Log("msg", "task event consumer error", "err", err)
-		}, tasktransport.WithLegacyStateWrites())
+		})
 	}
 
 	// Download service
@@ -139,6 +149,7 @@ func main() {
 		download.WithErrorHandler(func(ctx context.Context, err error) {
 			level.Error(logger).Log("msg", "download failed", "err", err)
 		}),
+		download.WithAttempts(attemptSvc, workerID),
 	)
 	// register downloaders
 	httpDL := downloader.NewHTTPDownloader(nil)
@@ -151,7 +162,9 @@ func main() {
 	dlSvc.RegisterDownloader("BITTORRENT", btDL)
 
 	// Start event consumer (download service listens for task events)
-	consumer := downloadtransport.NewEventConsumer(dlSvc, sub, logger)
+	// Every dispatch runs as a claimed attempt and is acknowledged only once
+	// its outcome is committed.
+	consumer := downloadtransport.NewEventConsumer(dlSvc, sub, logger, downloadtransport.WithAttemptRunner(dlSvc))
 
 	// Create a default pocket account and use a no-auth middleware that
 	// injects this account ID into requests (single-user mode).
@@ -280,6 +293,15 @@ func main() {
 			return outboxRelay.Run(relayCtx)
 		}, func(error) {
 			cancelRelay()
+		})
+	}
+
+	{
+		reconcileCtx, cancelReconcile := context.WithCancel(ctx)
+		g.Add(func() error {
+			return reconciler.Run(reconcileCtx)
+		}, func(error) {
+			cancelReconcile()
 		})
 	}
 
