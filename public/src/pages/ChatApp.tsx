@@ -1,17 +1,12 @@
-import { Link } from "react-router-dom";
-import { ChatTheme } from "@/components/chat/ChatTheme";
-import { Decor } from "@/components/chat/Decor";
+import { ChatWorkspace } from "@/components/chat/ChatWorkspace";
+import { ChatProvider } from "@/contexts/ChatContext";
 
+// The /app page. ChatProvider is the seam for the later backend slice: replace
+// it with an API-backed provider and the workspace stays as it is.
 const ChatApp = () => (
-  <ChatTheme className="chat-root flex flex-col">
-    <header className="chat-header">
-      <Link to="/" aria-label="GoLoad home" className="chat-surface chat-brand chat-display">
-        <Decor shape="spike" tone="red" />
-        GOLOAD
-      </Link>
-      <h1 className="chat-title">Chat workspace</h1>
-    </header>
-  </ChatTheme>
+  <ChatProvider>
+    <ChatWorkspace />
+  </ChatProvider>
 );
 
 export default ChatApp;
