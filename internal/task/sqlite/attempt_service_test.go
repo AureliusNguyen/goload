@@ -41,12 +41,13 @@ func (c *fakeClock) Advance(d time.Duration) {
 // attemptFixture is an AttemptService on a throwaway SQLite database with a
 // controllable clock.
 type attemptFixture struct {
-	clock    *fakeClock
-	repo     task.Repository
-	attempts task.AttemptRepository
-	outbox   task.OutboxRepository
-	tx       task.TxManager
-	svc      task.AttemptService
+	clock     *fakeClock
+	repo      task.Repository
+	attempts  task.AttemptRepository
+	reconcile task.ReconcileRepository
+	outbox    task.OutboxRepository
+	tx        task.TxManager
+	svc       task.AttemptService
 }
 
 func newAttemptFixture(t *testing.T) *attemptFixture {
@@ -54,11 +55,12 @@ func newAttemptFixture(t *testing.T) *attemptFixture {
 
 	pool := newTestPool(t)
 	f := &attemptFixture{
-		clock:    &fakeClock{now: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)},
-		repo:     NewTaskRepo(pool),
-		attempts: NewAttemptRepo(pool),
-		outbox:   NewOutboxRepo(pool),
-		tx:       NewTxManager(pool),
+		clock:     &fakeClock{now: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)},
+		repo:      NewTaskRepo(pool),
+		attempts:  NewAttemptRepo(pool),
+		reconcile: NewReconcileRepo(pool),
+		outbox:    NewOutboxRepo(pool),
+		tx:        NewTxManager(pool),
 	}
 	f.svc = task.NewAttemptService(f.attempts, f.tx, f.outbox, task.WithAttemptClock(f.clock.Now))
 	return f

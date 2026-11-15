@@ -23,9 +23,10 @@ var ownershipColumns = []struct {
 }
 
 // EnsureOwnershipSchema adds the task ownership columns (owner, lease,
-// generation, retry state) to an existing tasks table. It is idempotent; the
-// pocket binaries call it on every start, after the tasks table is created.
-// Existing rows read as unowned, generation 0, retry count 0.
+// generation, retry state) to an existing tasks table and creates the index
+// the reconciler reads through. It is idempotent; the pocket binaries call it
+// on every start, after the tasks table is created. Existing rows read as
+// unowned, generation 0, retry count 0.
 func EnsureOwnershipSchema(conn *sqlite.Conn) error {
 	existing := map[string]bool{}
 	err := sqlitex.ExecuteTransient(conn, `PRAGMA table_info(tasks);`, &sqlitex.ExecOptions{
@@ -50,5 +51,12 @@ func EnsureOwnershipSchema(conn *sqlite.Conn) error {
 			return err
 		}
 	}
-	return nil
+
+	// The reconciler looks for claimable tasks by status and lease expiry;
+	// the status prefix lets it skip the finished tasks.
+	return sqlitex.ExecuteTransient(
+		conn,
+		`CREATE INDEX IF NOT EXISTS tasks_reconcile_idx ON tasks (status, lease_expires_at);`,
+		nil,
+	)
 }
