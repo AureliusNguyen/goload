@@ -32,8 +32,11 @@ type Service interface {
 	// ExecuteTask waits for a download slot, then starts the task asynchronously.
 	// Execution failures are reported through task events and the error handler.
 	ExecuteTask(ctx context.Context, req TaskRequest) error
+	// PauseTask stops the queued or running execution of a task the user
+	// paused. Nothing stays parked: the bytes read so far are discarded, and a
+	// later resume is a fresh dispatch that downloads from zero.
 	PauseTask(ctx context.Context, taskID uint64) error
-	ResumeTask(ctx context.Context, taskID uint64) error
+	// CancelTask stops the queued or running execution of a cancelled task.
 	CancelTask(ctx context.Context, taskID uint64) error
 	StreamFile(ctx context.Context, req FileStreamRequest) (*FileStreamResponse, error)
 	GetActiveTaskCount(ctx context.Context) int
@@ -46,11 +49,13 @@ type Registrar interface {
 }
 
 type taskExecution struct {
-	task           TaskRequest
-	ctx            context.Context
-	cancelFunc     context.CancelFunc
-	progress       Progress
-	progressReader *PausableProgressReader
+	task       TaskRequest
+	ctx        context.Context
+	cancelFunc context.CancelFunc
+	progress   Progress
+	// stopped is set (under service.mu) when the task service paused or
+	// cancelled the task. A stopped execution ends without reporting a failure.
+	stopped bool
 }
 
 type service struct {
@@ -170,6 +175,11 @@ func (s *service) ExecuteTask(ctx context.Context, req TaskRequest) error {
 	// Wait before spawning so a full service applies backpressure to the consumer.
 	if err := s.sem.Acquire(taskCtx, 1); err != nil {
 		cleanup()
+		if s.isStopped(execution) {
+			// Paused or cancelled while it was still queued: nothing to run
+			// and nothing to redeliver.
+			return nil
+		}
 		return fmt.Errorf("failed to acquire download slot: %w", err)
 	}
 
@@ -183,6 +193,11 @@ func (s *service) ExecuteTask(ctx context.Context, req TaskRequest) error {
 		}()
 
 		if err := s.executeDownload(execution, downloader); err != nil {
+			if s.isStopped(execution) {
+				// Stopped by the task service (pause or cancel): the task row
+				// already says so, and a failure report would overwrite it.
+				return
+			}
 			s.markTaskFailed(taskCtx, req.TaskID, err)
 		}
 	}()
@@ -288,10 +303,6 @@ func (s *service) executeDownload(execution *taskExecution, downloader Downloade
 		}
 	})
 
-	s.mu.Lock()
-	execution.progressReader = progressReader
-	s.mu.Unlock()
-
 	if err := s.publisher.PublishTaskStatusUpdated(ctx, events.TaskStatusUpdatedEvent{
 		TaskID:    taskReq.TaskID,
 		Status:    events.StatusStoring,
@@ -343,55 +354,26 @@ func (s *service) executeDownload(execution *taskExecution, downloader Downloade
 	return nil
 }
 
-// PauseTask pauses a running task
+// PauseTask stops the execution of a task the user paused. See Service.
 func (s *service) PauseTask(ctx context.Context, taskID uint64) error {
-	s.mu.RLock()
-	execution, exists := s.activeTasks[taskID]
-	var progressReader *PausableProgressReader
-	if exists {
-		progressReader = execution.progressReader
-	}
-	s.mu.RUnlock()
-
-	if !exists {
-		return &errors.Error{Code: errors.ErrCodeNotFound, Message: "task not found in active tasks"}
-	}
-
-	if progressReader == nil {
-		return &errors.Error{Code: errors.ErrCodeInvalidInput, Message: "task is not in a pausable state"}
-	}
-
-	progressReader.Pause()
-	return nil
+	return s.stopTask(taskID)
 }
 
-// ResumeTask resumes a paused task
-func (s *service) ResumeTask(ctx context.Context, taskID uint64) error {
-	s.mu.RLock()
-	execution, exists := s.activeTasks[taskID]
-	var progressReader *PausableProgressReader
-	if exists {
-		progressReader = execution.progressReader
-	}
-	s.mu.RUnlock()
-
-	if !exists {
-		return &errors.Error{Code: errors.ErrCodeNotFound, Message: "task not found in active tasks"}
-	}
-
-	if progressReader == nil {
-		return &errors.Error{Code: errors.ErrCodeInvalidInput, Message: "task is not in a resumable state"}
-	}
-
-	progressReader.Resume()
-	return nil
-}
-
-// CancelTask cancels a running task
+// CancelTask stops the execution of a cancelled task.
 func (s *service) CancelTask(ctx context.Context, taskID uint64) error {
-	s.mu.RLock()
+	return s.stopTask(taskID)
+}
+
+// stopTask marks a queued or running execution as stopped and cancels its
+// context. The execution unwinds on its own: it frees its slot, removes its
+// partial object and reports no failure.
+func (s *service) stopTask(taskID uint64) error {
+	s.mu.Lock()
 	execution, exists := s.activeTasks[taskID]
-	s.mu.RUnlock()
+	if exists {
+		execution.stopped = true
+	}
+	s.mu.Unlock()
 
 	if !exists {
 		return &errors.Error{Code: errors.ErrCodeNotFound, Message: "task not found in active tasks"}
@@ -399,6 +381,13 @@ func (s *service) CancelTask(ctx context.Context, taskID uint64) error {
 
 	execution.cancelFunc()
 	return nil
+}
+
+// isStopped reports whether the task service stopped the execution.
+func (s *service) isStopped(execution *taskExecution) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return execution.stopped
 }
 
 // StreamFile streams a file to the client

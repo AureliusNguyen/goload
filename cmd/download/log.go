@@ -59,13 +59,6 @@ func (m *loggingMiddleware) PauseTask(ctx context.Context, taskID uint64) error 
 	return err
 }
 
-func (m *loggingMiddleware) ResumeTask(ctx context.Context, taskID uint64) error {
-	start := time.Now()
-	err := m.next.ResumeTask(ctx, taskID)
-	m.logErr("ResumeTask", time.Since(start), err)
-	return err
-}
-
 func (m *loggingMiddleware) CancelTask(ctx context.Context, taskID uint64) error {
 	start := time.Now()
 	err := m.next.CancelTask(ctx, taskID)

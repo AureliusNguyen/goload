@@ -457,3 +457,87 @@ func TestExecuteTask_StaleAttemptCleanupKeepsWinnersObject(t *testing.T) {
 		}
 	})
 }
+
+func TestPauseTaskStopsExecutionWithoutReportingFailure(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		dl := &blockingDownloader{started: make(chan struct{}, 2), release: release}
+		pub := &fakePublisher{}
+		svc := NewService(&fakeStorage{}, pub, WithMaxConcurrent(1))
+		svc.RegisterDownloader("HTTP", dl)
+		req := TaskRequest{TaskID: 1, SourceType: "HTTP"}
+		if err := svc.ExecuteTask(t.Context(), req); err != nil {
+			t.Fatalf("ExecuteTask() error = %v", err)
+		}
+		synctest.Wait()
+
+		if err := svc.PauseTask(t.Context(), 1); err != nil {
+			t.Fatalf("PauseTask() error = %v", err)
+		}
+		synctest.Wait()
+
+		if got := svc.GetActiveTaskCount(t.Context()); got != 0 {
+			t.Fatalf("active tasks after pause = %d, want 0: a paused download must not stay parked", got)
+		}
+		if pub.failed != nil {
+			t.Fatalf("a paused download must not report a failure, got %+v", pub.failed)
+		}
+
+		// A resume is a fresh dispatch of the same task. It must start a new
+		// download instead of being rejected as already running.
+		if err := svc.ExecuteTask(t.Context(), req); err != nil {
+			t.Fatalf("ExecuteTask() after pause error = %v", err)
+		}
+		synctest.Wait()
+		if got := len(dl.started); got != 2 {
+			t.Fatalf("started %d downloads, want 2", got)
+		}
+
+		close(release)
+		synctest.Wait()
+		if pub.completed == nil || pub.completed.TaskID != 1 {
+			t.Fatalf("expected the fresh download to complete, got %v", pub.completed)
+		}
+	})
+}
+
+func TestCancelTaskStopsQueuedExecution(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		dl := &blockingDownloader{started: make(chan struct{}, 2), release: release}
+		pub := &fakePublisher{}
+		svc := NewService(&fakeStorage{}, pub, WithMaxConcurrent(1))
+		svc.RegisterDownloader("HTTP", dl)
+		if err := svc.ExecuteTask(t.Context(), TaskRequest{TaskID: 1, SourceType: "HTTP"}); err != nil {
+			t.Fatalf("ExecuteTask() error = %v", err)
+		}
+		synctest.Wait()
+
+		// Task 2 waits for the only slot.
+		queued := make(chan error, 1)
+		go func() {
+			queued <- svc.ExecuteTask(t.Context(), TaskRequest{TaskID: 2, SourceType: "HTTP"})
+		}()
+		synctest.Wait()
+
+		if err := svc.CancelTask(t.Context(), 2); err != nil {
+			t.Fatalf("CancelTask() error = %v", err)
+		}
+		synctest.Wait()
+		if err := <-queued; err != nil {
+			t.Fatalf("a cancelled queued task must be dropped, not redelivered: ExecuteTask() error = %v", err)
+		}
+		if got := len(dl.started); got != 1 {
+			t.Fatalf("started %d downloads, want 1: the cancelled task must never start", got)
+		}
+		if pub.failed != nil {
+			t.Fatalf("a cancelled task must not report a failure, got %+v", pub.failed)
+		}
+
+		close(release)
+		synctest.Wait()
+		if got := svc.GetActiveTaskCount(t.Context()); got != 0 {
+			t.Fatalf("active tasks after completion = %d, want 0", got)
+		}
+	})
+}

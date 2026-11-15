@@ -43,12 +43,6 @@ func (ec *EventConsumer) Start(ctx context.Context) error {
 	}
 	level.Info(ec.logger).Log("msg", "subscription started", "topic", "task.paused")
 
-	taskResumedCh, err := ec.subscriber.Subscribe(ctx, string(events.EventTaskResumed))
-	if err != nil {
-		return err
-	}
-	level.Info(ec.logger).Log("msg", "subscription started", "topic", "task.resumed")
-
 	taskCancelledCh, err := ec.subscriber.Subscribe(ctx, string(events.EventTaskCancelled))
 	if err != nil {
 		return err
@@ -57,7 +51,6 @@ func (ec *EventConsumer) Start(ctx context.Context) error {
 
 	go ec.processTaskCreatedEvents(ctx, taskCreatedCh)
 	go ec.processTaskPausedEvents(ctx, taskPausedCh)
-	go ec.processTaskResumedEvents(ctx, taskResumedCh)
 	go ec.processTaskCancelledEvents(ctx, taskCancelledCh)
 
 	level.Info(ec.logger).Log("msg", "event consumer running, awaiting context done")
@@ -100,12 +93,6 @@ func (ec *EventConsumer) processTaskCreatedEvents(ctx context.Context, ch <-chan
 func (ec *EventConsumer) processTaskPausedEvents(ctx context.Context, ch <-chan *message.Message) {
 	ec.processControlEvents(ch, "TaskPausedEvent", func(taskID uint64) error {
 		return ec.service.PauseTask(ctx, taskID)
-	})
-}
-
-func (ec *EventConsumer) processTaskResumedEvents(ctx context.Context, ch <-chan *message.Message) {
-	ec.processControlEvents(ch, "TaskResumedEvent", func(taskID uint64) error {
-		return ec.service.ResumeTask(ctx, taskID)
 	})
 }
 

@@ -3,6 +3,7 @@ package downloadtransport
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,10 +33,6 @@ func (f *fakeDownloadService) PauseTask(ctx context.Context, taskID uint64) erro
 	if f.pauseFn != nil {
 		return f.pauseFn(ctx, taskID)
 	}
-	return nil
-}
-
-func (f *fakeDownloadService) ResumeTask(_ context.Context, _ uint64) error {
 	return nil
 }
 
@@ -152,4 +149,50 @@ func TestProcessTaskPausedEvents_NacksOtherErrors(t *testing.T) {
 
 	ec.processTaskPausedEvents(t.Context(), ch)
 	assert.False(t, waitAckOrNack(t, msg))
+}
+
+// recordingSubscriber records the topics a consumer subscribes to. Its
+// channels deliver nothing and close with the subscription context.
+type recordingSubscriber struct {
+	mu     sync.Mutex
+	topics []string
+}
+
+func (s *recordingSubscriber) Subscribe(ctx context.Context, topic string) (<-chan *message.Message, error) {
+	s.mu.Lock()
+	s.topics = append(s.topics, topic)
+	s.mu.Unlock()
+
+	ch := make(chan *message.Message)
+	go func() {
+		<-ctx.Done()
+		close(ch)
+	}()
+	return ch, nil
+}
+
+func (s *recordingSubscriber) Close() error { return nil }
+
+func (s *recordingSubscriber) snapshot() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.topics...)
+}
+
+func TestStart_SubscribesToDispatchAndStopTopicsOnly(t *testing.T) {
+	t.Parallel()
+
+	sub := &recordingSubscriber{}
+	ec := NewEventConsumer(&fakeDownloadService{}, sub, log.NewNopLogger())
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	stopped := make(chan error, 1)
+	go func() { stopped <- ec.Start(ctx) }()
+
+	require.Eventually(t, func() bool { return len(sub.snapshot()) >= 3 }, 2*time.Second, 5*time.Millisecond)
+	cancel()
+	require.ErrorIs(t, <-stopped, context.Canceled)
+
+	// A resume is a fresh task.created dispatch; there is no task.resumed.
+	assert.Equal(t, []string{"task.created", "task.paused", "task.cancelled"}, sub.snapshot())
 }
