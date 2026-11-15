@@ -37,7 +37,25 @@ type AttemptRunner interface {
 	RunAttempt(ctx context.Context, req TaskRequest) error
 }
 
-var _ AttemptRunner = (*service)(nil)
+// AdmittingRunner is an AttemptRunner whose download slots are taken by the
+// caller. A consumer that Admits before it spawns a worker goroutine bounds
+// the goroutines it has in flight and keeps backpressure on its input; the
+// slot is owned by the service's semaphore alone and is released by
+// RunAdmittedAttempt.
+type AdmittingRunner interface {
+	AttemptRunner
+	// Admit blocks until a download slot is free. On nil the caller must pass
+	// the dispatch to RunAdmittedAttempt, which releases the slot.
+	Admit(ctx context.Context) error
+	// RunAdmittedAttempt is RunAttempt for a caller that holds a slot from
+	// Admit; the slot is released when it returns.
+	RunAdmittedAttempt(ctx context.Context, req TaskRequest) error
+}
+
+var (
+	_ AttemptRunner   = (*service)(nil)
+	_ AdmittingRunner = (*service)(nil)
+)
 
 // WithAttempts makes the service attempt-aware: RunAttempt claims every task
 // through attempts before it executes it. workerID is the stable identity of
@@ -148,6 +166,23 @@ func (r *attemptRun) heartbeat(ctx context.Context, stop context.CancelFunc) {
 // RunAttempt implements AttemptRunner: wait for a slot, claim, transfer under
 // a heartbeat, then record the outcome.
 func (s *service) RunAttempt(ctx context.Context, req TaskRequest) error {
+	return s.runAttempt(ctx, req, false)
+}
+
+// Admit implements AdmittingRunner.
+func (s *service) Admit(ctx context.Context) error {
+	return s.sem.Acquire(ctx, 1)
+}
+
+// RunAdmittedAttempt implements AdmittingRunner.
+func (s *service) RunAdmittedAttempt(ctx context.Context, req TaskRequest) error {
+	defer s.sem.Release(1)
+	return s.runAttempt(ctx, req, true)
+}
+
+// runAttempt executes one dispatch. admitted reports that the caller already
+// holds a download slot (and releases it); otherwise runAttempt waits for one.
+func (s *service) runAttempt(ctx context.Context, req TaskRequest, admitted bool) error {
 	if s.attempts == nil || s.workerID == "" {
 		return &errors.Error{
 			Code:    errors.ErrCodeInternal,
@@ -178,13 +213,15 @@ func (s *service) RunAttempt(ctx context.Context, req TaskRequest) error {
 
 	// Take the slot before claiming: the lease then only has to cover the
 	// execution, and a queued task stays PENDING.
-	if err := s.sem.Acquire(queueCtx, 1); err != nil {
-		if s.isStopped(execution) {
-			return nil
+	if !admitted {
+		if err := s.sem.Acquire(queueCtx, 1); err != nil {
+			if s.isStopped(execution) {
+				return nil
+			}
+			return fmt.Errorf("failed to acquire download slot: %w", err)
 		}
-		return fmt.Errorf("failed to acquire download slot: %w", err)
+		defer s.sem.Release(1)
 	}
-	defer s.sem.Release(1)
 
 	claimCtx, cancelClaim := context.WithTimeout(queueCtx, attemptCallTimeout)
 	attempt, err := s.attempts.ClaimTask(claimCtx, req.TaskID, s.workerID)

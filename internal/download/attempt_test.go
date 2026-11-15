@@ -786,3 +786,41 @@ func TestRunAttempt_RejectedReleaseIsNotAnError(t *testing.T) {
 		}
 	})
 }
+
+func TestRunAdmittedAttempt_ReleasesTheSlotTheCallerAdmitted(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		attempts := &fakeAttempts{generation: 1}
+		svc := NewService(&fakeStorage{}, &busSpy{}, WithAttempts(attempts, "worker-1"), WithMaxConcurrent(1))
+		svc.RegisterDownloader("HTTP", &blockingDownloader{started: make(chan struct{}, 1), release: closedChan()})
+
+		if err := svc.Admit(t.Context()); err != nil {
+			t.Fatalf("Admit() error = %v", err)
+		}
+		// The only slot is held: a second Admit waits.
+		second := make(chan error, 1)
+		go func() { second <- svc.Admit(t.Context()) }()
+		synctest.Wait()
+		select {
+		case <-second:
+			t.Fatal("Admit returned while the only slot was held")
+		default:
+		}
+
+		// RunAdmittedAttempt must not acquire again, and frees the slot.
+		if err := svc.RunAdmittedAttempt(t.Context(), attemptRequest()); err != nil {
+			t.Fatalf("RunAdmittedAttempt() error = %v", err)
+		}
+		if err := <-second; err != nil {
+			t.Fatalf("second Admit() error = %v", err)
+		}
+		if got := attempts.count("complete"); got != 1 {
+			t.Fatalf("calls = %v, want one completion", attempts.log())
+		}
+	})
+}
+
+func closedChan() chan struct{} {
+	c := make(chan struct{})
+	close(c)
+	return c
+}
