@@ -105,8 +105,9 @@ func TestCreateTask_MovesTorrentDataURLToMinioBeforeDBAndKafka(t *testing.T) {
 	presigner := fakePresigner{}
 	fakeMsgPub := &fakeMessagePublisher{}
 	eventPub := NewEventPublisher(fakeMsgPub)
+	outbox := &memOutbox{}
 
-	svc := NewService(repo, *eventPub, tx,
+	svc := NewService(repo, *eventPub, tx, outbox,
 		WithTaskSourceStore(writer),
 		WithTaskSourcePresigner(presigner),
 	)
@@ -128,12 +129,15 @@ func TestCreateTask_MovesTorrentDataURLToMinioBeforeDBAndKafka(t *testing.T) {
 	require.True(t, strings.HasPrefix(repo.created.SourceURL, "http://"))
 	require.Contains(t, repo.created.SourceURL, "/task-sources/")
 
-	// Ensure Kafka payload also contains only the presigned URL
-	require.Equal(t, "task.created", fakeMsgPub.topic)
-	require.Len(t, fakeMsgPub.msgs, 1)
+	// CreateTask no longer publishes directly. The event waits in the outbox
+	// and its payload must also contain only the presigned URL.
+	require.Empty(t, fakeMsgPub.msgs)
+	queued := outbox.snapshot()
+	require.Len(t, queued, 1)
+	require.Equal(t, OutboxEventTaskCreated, queued[0].EventType)
 
 	var payload map[string]any
-	require.NoError(t, json.Unmarshal(fakeMsgPub.msgs[0].Payload, &payload))
+	require.NoError(t, json.Unmarshal(queued[0].Payload, &payload))
 	sourceURLAny, ok := payload["source_url"]
 	require.True(t, ok)
 	sourceURL, _ := sourceURLAny.(string)
@@ -151,7 +155,7 @@ func TestCreateTask_MovesTorrentDataURLToMinioBeforeDBAndKafka(t *testing.T) {
 }
 
 func TestListTasks_RequiresFilter(t *testing.T) {
-	svc := NewService(&fakeRepo{}, Publisher{}, fakeTxManager{})
+	svc := NewService(&fakeRepo{}, Publisher{}, fakeTxManager{}, &memOutbox{})
 
 	_, err := svc.ListTasks(context.Background(), &ListTasksParam{})
 	require.Error(t, err)
@@ -165,7 +169,7 @@ func TestListTasks_ReturnsRepositoryTotal(t *testing.T) {
 			{ID: 2, OfAccountID: 7},
 		},
 	}
-	svc := NewService(repo, Publisher{}, fakeTxManager{})
+	svc := NewService(repo, Publisher{}, fakeTxManager{}, &memOutbox{})
 
 	out, err := svc.ListTasks(context.Background(), &ListTasksParam{
 		Filter: &TaskFilter{OfAccountID: 7},
@@ -178,7 +182,7 @@ func TestListTasks_ReturnsRepositoryTotal(t *testing.T) {
 
 func TestUpdateTaskErrorStoresErrorMessage(t *testing.T) {
 	repo := &fakeRepo{}
-	svc := NewService(repo, Publisher{}, fakeTxManager{})
+	svc := NewService(repo, Publisher{}, fakeTxManager{}, &memOutbox{})
 
 	err := svc.UpdateTaskError(context.Background(), 42, errors.New("boom"))
 	require.NoError(t, err)
@@ -194,7 +198,7 @@ func TestCreateTask_TorrentDataURLRequiresStorageConfig(t *testing.T) {
 	fakeMsgPub := &fakeMessagePublisher{}
 	eventPub := NewEventPublisher(fakeMsgPub)
 
-	svc := NewService(&fakeRepo{}, *eventPub, fakeTxManager{})
+	svc := NewService(&fakeRepo{}, *eventPub, fakeTxManager{}, &memOutbox{})
 	_, err := svc.CreateTask(context.Background(), &CreateTaskParam{
 		OfAccountID: 1,
 		FileName:    "upload.torrent",

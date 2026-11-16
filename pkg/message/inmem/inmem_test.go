@@ -1,6 +1,7 @@
 package inmem
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -73,5 +74,29 @@ func TestPublishSubscribe_NackRedeliver(t *testing.T) {
 		m.Ack()
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for redelivered message")
+	}
+}
+
+func TestPublishRequiringSubscriber(t *testing.T) {
+	pub, sub := NewPublisherAndSubscriber(log.NewNopLogger())
+
+	err := pub.PublishRequiringSubscriber("topic3", message.NewMessage("3", []byte("x")))
+	assert.True(t, errors.Is(err, ErrNoSubscribers))
+
+	ch, err := sub.Subscribe(t.Context(), "topic3")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := pub.PublishRequiringSubscriber("topic3", message.NewMessage("3", []byte("x"))); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case m := <-ch:
+		assert.Equal(t, "3", m.UUID)
+		m.Ack()
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for message")
 	}
 }

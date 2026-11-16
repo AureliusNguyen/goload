@@ -7,6 +7,7 @@ package sqlc
 import (
 	"database/sql"
 	"encoding/json"
+	"time"
 )
 
 type Task struct {
@@ -36,4 +37,14 @@ type Task struct {
 	CompletedAt     sql.NullTime    `json:"completed_at"`
 	LastAccessedAt  sql.NullTime    `json:"last_accessed_at"`
 	ExpirationDays  sql.NullInt32   `json:"expiration_days"`
+}
+
+type TaskOutbox struct {
+	ID          string       `json:"id"`
+	AggregateID uint64       `json:"aggregate_id"`
+	Destination string       `json:"destination"`
+	EventType   string       `json:"event_type"`
+	Payload     []byte       `json:"payload"`
+	CreatedAt   time.Time    `json:"created_at"`
+	SentAt      sql.NullTime `json:"sent_at"`
 }
