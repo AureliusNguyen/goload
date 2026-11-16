@@ -57,17 +57,21 @@ Goload is a file-download manager built with Go. It can run in two modes:
 
 | Service | Docs | Entry point | Port | Protocol |
 |---------|------|-------------|------|----------|
-| **API Gateway** | [apigateway-service.md](./docs/apigateway-service.md) | `cmd/apigateway/main.go` | 8080 | HTTP/JSON |
-| **Auth Service** | [auth-service.md](./docs/auth-service.md) | `cmd/auth/svc/main.go` | 8081 | gRPC |
-| **Task Service** | [task-service.md](./docs/task-service.md) | `cmd/task/main.go` | 8082 | gRPC |
-| **Download Service** | [download-service.md](./docs/download-service.md) | `cmd/download/main.go` | — | Kafka (event-driven) |
-| **Pocket Edition** | [pocket-edition.md](./docs/pocket-edition.md) | `cmd/pocket/main.go` | 8080 | HTTP/JSON + local services |
+| **API Gateway** | [apigateway.md](./docs/services/apigateway.md) | `cmd/apigateway/main.go` | 8080 | HTTP/JSON |
+| **Auth Service** | [auth.md](./docs/services/auth.md) | `cmd/auth/svc/main.go` | 8081 | gRPC |
+| **Task Service** | [task.md](./docs/services/task.md) | `cmd/task/main.go` | 8082 | gRPC |
+| **Download Service** | [download.md](./docs/services/download.md) | `cmd/download/main.go` | — | Kafka (event-driven) |
+| **Pocket Edition** | [pocket.md](./docs/services/pocket.md) | `cmd/pocket/main.go` | 8080 | HTTP/JSON + local services |
+
+Architecture: [overview](./docs/architecture/overview.md) · [service catalog](./docs/architecture/service-catalog.md) · [data flows](./docs/architecture/data-flows.md)
+
+Agent entry: [AGENTS.md](./AGENTS.md) ([CLAUDE.md](./CLAUDE.md)). Engineering docs: [standards](./docs/standards/) · [ADRs](./docs/adr/) · [research](./docs/research.md) · [exemplars](./docs/ai/exemplars.md) · [legacy map](./docs/ai/legacy-map.md) · [lessons](./docs/ai/lessons.md) · [enforcement proposals](./docs/ai/enforcement.md)
 
 ### Shared packages
 
 | Package | Docs | Description |
 |---------|------|-------------|
-| `pkg/message` | [pkg-message.md](./docs/444pkg-message.md) | Pub/Sub abstraction + Kafka implementation |
+| `pkg/message` | — | Pub/Sub abstraction + Kafka implementation |
 | `pkg/cache` | — | Generic cache interface + Redis/in-memory implementations |
 | `pkg/crypto` | — | bcrypt hasher and RSA key helpers |
 | `internal/events` | — | Shared event struct definitions |
