@@ -19,7 +19,7 @@ func NewPublisher(b *broker) *Publisher {
 
 // ErrNoSubscribers is returned by PublishRequiringSubscriber when the topic has
 // no subscriber in the snapshot taken for that call.
-var ErrNoSubscribers = errors.New("inmem: no subscribers on topic")
+var ErrNoSubscribers = errors.New("no subscribers on topic")
 
 func (p *Publisher) Publish(topic string, msgs ...*message.Message) error {
 	subs := p.broker.getSubs(topic)

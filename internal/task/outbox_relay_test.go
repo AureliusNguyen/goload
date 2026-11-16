@@ -310,7 +310,7 @@ func TestOutboxRelay_Inmem_WaitsForSubscriber(t *testing.T) {
 	// subscribed. The in-memory bus would drop the message, so it must stay
 	// unsent instead of being marked sent.
 	sent, err := relay.RunOnce(context.Background())
-	require.ErrorIs(t, err, ErrOutboxNoSubscribers)
+	require.ErrorIs(t, err, inmem.ErrNoSubscribers)
 	require.Zero(t, sent)
 	require.Equal(t, []string{"evt-1"}, outbox.unsentIDs())
 

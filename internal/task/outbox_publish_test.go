@@ -125,7 +125,7 @@ func TestPublishOutboxEvent_InmemRequiresSubscriber(t *testing.T) {
 
 	// Nobody listens yet: the in-memory bus would drop the message.
 	err := pub.PublishOutboxEvent(context.Background(), event)
-	require.ErrorIs(t, err, ErrOutboxNoSubscribers)
+	require.ErrorIs(t, err, inmem.ErrNoSubscribers)
 
 	ch, err := msgSub.Subscribe(t.Context(), "task.created")
 	require.NoError(t, err)

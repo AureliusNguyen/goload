@@ -181,11 +181,6 @@ func formatTaskID(taskID uint64) string {
 	return strconv.FormatUint(taskID, 10)
 }
 
-// ErrOutboxNoSubscribers is returned by an OutboxTransport that requires a live
-// subscriber when the destination topic has none yet. The relay keeps the row
-// unsent and republishes it on a later pass.
-var ErrOutboxNoSubscribers = errors.New("outbox: no subscribers on topic")
-
 // OutboxTransport delivers a built outbox message on the underlying bus. It is
 // the explicit seam for the "publish only when a subscriber exists" contract:
 // an implementation either requires a subscriber (RequireSubscriberTransport)
@@ -193,10 +188,9 @@ var ErrOutboxNoSubscribers = errors.New("outbox: no subscribers on topic")
 // depends on this interface, not on a concrete transport or a runtime type
 // assertion, so every message.Publisher keeps the same semantics.
 type OutboxTransport interface {
-	// Deliver publishes msg on topic. It returns ErrOutboxNoSubscribers when
-	// the transport requires a live subscriber and none exists (the row must
-	// stay unsent); nil on a successful publish; any other error is a
-	// transport failure.
+	// Deliver publishes msg on topic. A non-nil error means the message was
+	// not delivered (for a require-subscriber transport, that no subscriber
+	// exists); the relay then keeps the row unsent and retries on a later pass.
 	Deliver(topic string, msg *message.Message) error
 }
 
@@ -207,8 +201,8 @@ type RequiringSubscriberPublisher interface {
 }
 
 // RequireSubscriberTransport adapts a RequiringSubscriberPublisher (the
-// in-memory bus) to OutboxTransport: Deliver returns ErrOutboxNoSubscribers
-// when the topic has no subscriber yet.
+// in-memory bus) to OutboxTransport: Deliver fails when the topic has no
+// subscriber yet, so the outbox row stays unsent.
 type RequireSubscriberTransport struct {
 	pub RequiringSubscriberPublisher
 }
@@ -218,13 +212,10 @@ func NewRequireSubscriberTransport(pub RequiringSubscriberPublisher) *RequireSub
 	return &RequireSubscriberTransport{pub: pub}
 }
 
-// Deliver implements OutboxTransport.
+// Deliver implements OutboxTransport. It returns the transport's error
+// unchanged so the caller sees exactly why the message was not delivered.
 func (t *RequireSubscriberTransport) Deliver(topic string, msg *message.Message) error {
-	if err := t.pub.PublishRequiringSubscriber(topic, msg); err != nil {
-		// The only error this returns is "no subscriber": keep the row unsent.
-		return fmt.Errorf("%w: %s", ErrOutboxNoSubscribers, topic)
-	}
-	return nil
+	return t.pub.PublishRequiringSubscriber(topic, msg)
 }
 
 // RetainingTransport adapts a message.Publisher that retains messages without a
