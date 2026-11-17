@@ -11,12 +11,17 @@
 
 /* 1. Tokens */
 .chat-theme {
-  /* Spec palette. These hex values are the source of truth. */
-  --chat-ink: #120B0A;
-  --chat-ash: #EAE7E6;
+  /* Graphite + amber palette. These hex values are the source of truth.
+     "ember" is the legacy name of the amber accent (tone="ember" in code). */
+  --chat-ink: #151618;
+  --chat-surface: #202226;
+  --chat-raised: #2A2D32;
+  --chat-line: #34363C;
+  --chat-ash: #EEEDE9;
+  --chat-muted: #A3A19B;
+  --chat-ember: #F2BE54;
   --chat-red: #D7261E;
-  --chat-scale: #8E1A14;
-  --chat-ember: #FFC21A;
+  --chat-green: #5FBF86;
 
   /* The one shared shear angle. Every cut, edge and texture derives from it. */
   --chat-tilt: -6deg;
@@ -24,9 +29,9 @@
   --chat-cut-w: 96px;
   --chat-cut-h: calc(var(--chat-cut-w) * var(--chat-slope));
 
-  --chat-edge: 3px;
-  --chat-shadow: 6px 6px 0 0 var(--chat-red);
-  --chat-shadow-ember: 4px 4px 0 0 var(--chat-ember);
+  --chat-edge: 1px;
+  --chat-shadow: none;
+  --chat-shadow-ember: none;
 
   --chat-font-display: "Dela Gothic One", "Zen Kaku Gothic New", sans-serif;
   --chat-font-body: "Zen Kaku Gothic New", system-ui, sans-serif;
@@ -34,28 +39,28 @@
 
   /* shadcn tokens for this subtree only. HSL channel triplets, because
      tailwind.config.ts wraps each one in hsl(). */
-  --background: 7.5 28.6% 5.5%;
-  --foreground: 15 8.7% 91%;
-  --card: 8 24% 9%;
-  --card-foreground: 15 8.7% 91%;
-  --popover: 8 24% 9%;
-  --popover-foreground: 15 8.7% 91%;
-  --primary: 2.6 75.5% 48%;
-  --primary-foreground: 0 0% 98%;
-  --primary-glow: 2.6 75.5% 48%;
-  --primary-soft: 3 75.3% 31.8%;
-  --primary-soft-foreground: 15 8.7% 91%;
-  --secondary: 3 75.3% 31.8%;
-  --secondary-foreground: 15 8.7% 91%;
-  --muted: 8 18% 13%;
-  --muted-foreground: 30 10% 66%;
-  --accent: 44 100% 55.1%;
-  --accent-foreground: 7.5 28.6% 5.5%;
+  --background: 210 6.7% 8.8%;
+  --foreground: 48 14% 92%;
+  --card: 220 8% 13.7%;
+  --card-foreground: 48 14% 92%;
+  --popover: 220 8% 13.7%;
+  --popover-foreground: 48 14% 92%;
+  --primary: 40 87% 62%;
+  --primary-foreground: 210 6.7% 8.8%;
+  --primary-glow: 40 87% 62%;
+  --primary-soft: 220 7% 17%;
+  --primary-soft-foreground: 48 14% 92%;
+  --secondary: 220 7% 17%;
+  --secondary-foreground: 48 14% 92%;
+  --muted: 220 8% 13.7%;
+  --muted-foreground: 45 4% 62%;
+  --accent: 220 7% 17%;
+  --accent-foreground: 48 14% 92%;
   --destructive: 2.6 75.5% 48%;
   --destructive-foreground: 0 0% 98%;
-  --border: 15 8.7% 91%;
-  --input: 15 8.7% 91%;
-  --ring: 44 100% 55.1%;
+  --border: 225 6% 22%;
+  --input: 225 6% 22%;
+  --ring: 40 87% 62%;
   /* Needs the unit: tailwind.config.ts computes calc(var(--radius) - 8px). */
   --radius: 0px;
 
@@ -85,8 +90,8 @@
   font-family: var(--chat-font-mono);
 }
 .chat-theme ::selection {
-  background: #FFC21A;
-  color: #120B0A;
+  background: var(--chat-ember);
+  color: var(--chat-ink);
 }
 
 /* 4. Focus: an outline, so a hard shadow (box-shadow) can never replace it.
@@ -110,25 +115,25 @@
   z-index: -1;
   pointer-events: none;
   --decor-fill: var(--chat-ink);
-  --decor-edge: var(--chat-ash);
+  --decor-edge: var(--chat-line);
   --decor-shadow: none;
 }
 .chat-theme [data-chat-decor][data-tone="card"] {
-  --decor-fill: hsl(var(--card));
+  --decor-fill: var(--chat-surface);
 }
 .chat-theme [data-chat-decor][data-tone="red"] {
   --decor-fill: var(--chat-red);
 }
 .chat-theme [data-chat-decor][data-tone="scale"] {
-  --decor-fill: var(--chat-scale);
+  --decor-fill: var(--chat-raised);
 }
 .chat-theme [data-chat-decor][data-tone="ember"] {
   --decor-fill: var(--chat-ember);
-  --decor-edge: var(--chat-ink);
+  --decor-edge: var(--chat-ember);
 }
 .chat-theme [data-chat-decor][data-tone="ash"] {
   --decor-fill: var(--chat-ash);
-  --decor-edge: var(--chat-ink);
+  --decor-edge: var(--chat-ash);
 }
 .chat-theme [data-chat-decor][data-shadow="red"] {
   --decor-shadow: var(--chat-shadow);
@@ -150,7 +155,7 @@
    boxes, where a full shear would push text outside the shape. The hard
    shadow is a drop-shadow so it follows the cut corners. */
 .chat-theme [data-chat-decor="panel"] {
-  filter: drop-shadow(6px 6px 0 var(--chat-red));
+  filter: none;
 }
 .chat-theme [data-chat-decor="panel"]::before,
 .chat-theme [data-chat-decor="panel"]::after {
@@ -218,10 +223,8 @@
   font-weight: 700;
 }
 .chat-theme .chat-btn[data-tone="red"],
-.chat-theme .chat-btn[data-tone="red"]:hover,
-.chat-theme .chat-btn[data-tone="scale"],
-.chat-theme .chat-btn[data-tone="scale"]:hover {
-  color: hsl(var(--primary-foreground));
+.chat-theme .chat-btn[data-tone="red"]:hover {
+  color: #fff;
 }
 .chat-theme .chat-btn[data-tone="ember"],
 .chat-theme .chat-btn[data-tone="ember"]:hover,
@@ -245,7 +248,7 @@
 }
 .chat-theme .chat-btn:disabled [data-chat-decor="plate"] {
   --decor-fill: hsl(var(--muted));
-  --decor-edge: hsl(var(--muted-foreground));
+  --decor-edge: var(--chat-line);
   --decor-shadow: none;
 }
 
@@ -389,7 +392,7 @@
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: thin;
-  scrollbar-color: var(--chat-red) transparent;
+  scrollbar-color: var(--chat-line) transparent;
 }
 .chat-theme .chat-kicker {
   margin: 0;
@@ -575,7 +578,7 @@
   gap: 16px;
   width: min(20rem, 86vw);
   padding: 16px;
-  border-right: var(--chat-edge) solid var(--chat-ash);
+  border-right: var(--chat-edge) solid var(--chat-line);
   box-shadow: var(--chat-shadow);
 }
 

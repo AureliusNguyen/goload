@@ -86,15 +86,14 @@ describe("chat theme scope", () => {
     expect(reset?.selectors).toEqual(expect.arrayContaining([".chat-theme", ".chat-theme *"]));
   });
 
-  it("declares the spec palette, shadows and fonts verbatim", () => {
+  it("declares the graphite and amber palette and fonts verbatim", () => {
     const lower = css.toLowerCase();
     for (const value of [
-      "#120B0A",
+      "#151618",
+      "#202226",
+      "#EEEDE9",
+      "#F2BE54",
       "#D7261E",
-      "#8E1A14",
-      "#FFC21A",
-      "6px 6px 0",
-      "4px 4px 0",
       "Dela Gothic One",
       "Zen Kaku Gothic New",
       "JetBrains Mono",
@@ -120,7 +119,7 @@ describe("chat theme scope", () => {
     expect(offenders).toEqual([]);
   });
 
-  it("puts ink text on ember buttons", () => {
+  it("puts ink text on amber buttons", () => {
     const ember = rules.filter((rule) =>
       rule.selectors.some((selector) => selector.includes('.chat-btn[data-tone="ember"]')),
     );
