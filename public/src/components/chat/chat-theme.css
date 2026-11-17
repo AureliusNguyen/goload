@@ -202,6 +202,15 @@
   color: hsl(var(--muted-foreground));
   opacity: 1;
 }
+/* A disabled send stays amber (dimmed) so the primary action never reads dark. */
+.chat-theme .chat-btn[data-tone="ember"]:disabled {
+  color: var(--chat-ink);
+}
+.chat-theme .chat-btn[data-tone="ember"]:disabled [data-chat-decor="plate"] {
+  --decor-fill: var(--chat-ember);
+  --decor-edge: var(--chat-ember);
+  opacity: 0.7;
+}
 .chat-theme .chat-btn:disabled [data-chat-decor="plate"] {
   --decor-fill: hsl(var(--muted));
   --decor-edge: var(--chat-line);
