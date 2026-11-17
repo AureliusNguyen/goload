@@ -6,7 +6,6 @@ import { MessagePanel } from "@/components/chat/MessagePanel";
 import { isNearBottom } from "@/lib/chat/scroll";
 import type { ChatMessage } from "@/lib/chat/types";
 
-// eslint-disable-next-line react-refresh/only-export-components
 export const SUGGESTIONS = [
   "Download https://example.com/big-file.iso",
   "Show me a command to verify a checksum",
