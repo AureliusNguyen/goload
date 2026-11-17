@@ -299,6 +299,58 @@ func (q *Queries) InsertOutbox(ctx context.Context, arg InsertOutboxParams) (sql
 	)
 }
 
+const listReconcilable = `-- name: ListReconcilable :many
+SELECT id, attempt_generation
+FROM tasks
+WHERE id > ?
+  AND (
+        (status = 'PENDING' AND owner_id IS NULL AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
+     OR (status IN ('DOWNLOADING', 'STORING') AND (lease_expires_at IS NULL OR lease_expires_at <= ?))
+      )
+ORDER BY id ASC
+LIMIT ?
+`
+
+type ListReconcilableParams struct {
+	ID             uint64       `json:"id"`
+	NextAttemptAt  sql.NullTime `json:"next_attempt_at"`
+	LeaseExpiresAt sql.NullTime `json:"lease_expires_at"`
+	Limit          int32        `json:"limit"`
+}
+
+type ListReconcilableRow struct {
+	ID                uint64 `json:"id"`
+	AttemptGeneration uint64 `json:"attempt_generation"`
+}
+
+func (q *Queries) ListReconcilable(ctx context.Context, arg ListReconcilableParams) ([]ListReconcilableRow, error) {
+	rows, err := q.db.QueryContext(ctx, listReconcilable,
+		arg.ID,
+		arg.NextAttemptAt,
+		arg.LeaseExpiresAt,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListReconcilableRow
+	for rows.Next() {
+		var i ListReconcilableRow
+		if err := rows.Scan(&i.ID, &i.AttemptGeneration); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listTasks = `-- name: ListTasks :many
 SELECT id, of_account_id, file_name, source_url, source_type, headers, source_auth, storage_type, storage_path, checksum_type, checksum_value, concurrency, max_speed, max_retries, timeout, status, progress, downloaded_bytes, total_bytes, error_message, metadata, created_at, updated_at, completed_at, last_accessed_at, expiration_days, owner_id, lease_expires_at, attempt_generation, retry_count, next_attempt_at
 FROM tasks

@@ -3,31 +3,26 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	"math"
 	"time"
 
 	task "github.com/yuisofull/goload/internal/task"
+	"github.com/yuisofull/goload/internal/task/mysql/sqlc"
 )
 
-// listReconcilableSQL selects the claimable tasks. The arguments are: the id
-// to start after, now (twice) and the page size.
-const listReconcilableSQL = `SELECT id, attempt_generation
-FROM tasks
-WHERE id > ?
-  AND (
-        (status = 'PENDING' AND owner_id IS NULL AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
-     OR (status IN ('DOWNLOADING', 'STORING') AND (lease_expires_at IS NULL OR lease_expires_at <= ?))
-      )
-ORDER BY id ASC
-LIMIT ?`
-
-// NewReconcileRepo returns the MySQL implementation of task.ReconcileRepository.
-// Like the attempt repository it uses plain database/sql and needs
-// parseTime=true in the DSN.
-func NewReconcileRepo(db *sql.DB) task.ReconcileRepository {
-	return &attemptRepo{db: db}
+// reconcileRepo implements task.ReconcileRepository. The listing is
+// read-only, so it needs neither a transaction nor a row lock.
+type reconcileRepo struct {
+	queries *sqlc.Queries
 }
 
-func (r *attemptRepo) ListReconcilable(
+// NewReconcileRepo returns the MySQL implementation of task.ReconcileRepository.
+// It uses the sqlc-generated queries and needs parseTime=true in the DSN.
+func NewReconcileRepo(db *sql.DB) task.ReconcileRepository {
+	return &reconcileRepo{queries: sqlc.New(db)}
+}
+
+func (r *reconcileRepo) ListReconcilable(
 	ctx context.Context,
 	now time.Time,
 	afterID uint64,
@@ -37,25 +32,25 @@ func (r *attemptRepo) ListReconcilable(
 	if limit <= 0 {
 		return nil, nil
 	}
+	if limit > math.MaxInt32 {
+		limit = math.MaxInt32
+	}
 
 	// The lease and retry columns are DATETIME(6): compare at that precision.
-	at := now.UTC().Truncate(time.Microsecond)
-	rows, err := r.db.QueryContext(ctx, listReconcilableSQL, afterID, at, at, limit)
+	at := sql.NullTime{Time: now.UTC().Truncate(time.Microsecond), Valid: true}
+	rows, err := r.queries.ListReconcilable(ctx, sqlc.ListReconcilableParams{
+		ID:             afterID,
+		NextAttemptAt:  at,
+		LeaseExpiresAt: at,
+		Limit:          int32(limit),
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
 	var candidates []task.ReconcileCandidate
-	for rows.Next() {
-		var candidate task.ReconcileCandidate
-		if err := rows.Scan(&candidate.TaskID, &candidate.Generation); err != nil {
-			return nil, err
-		}
-		candidates = append(candidates, candidate)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+	for _, row := range rows {
+		candidates = append(candidates, task.ReconcileCandidate{TaskID: row.ID, Generation: row.AttemptGeneration})
 	}
 	return candidates, nil
 }

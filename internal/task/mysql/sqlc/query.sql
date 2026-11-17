@@ -121,3 +121,14 @@ SET status = ?, owner_id = ?, lease_expires_at = ?, attempt_generation = ?, retr
     file_name = ?, storage_type = ?, storage_path = ?, checksum_type = ?, checksum_value = ?,
     progress = ?, downloaded_bytes = ?, total_bytes = ?, error_message = ?, completed_at = ?
 WHERE id = ?;
+
+-- name: ListReconcilable :many
+SELECT id, attempt_generation
+FROM tasks
+WHERE id > ?
+  AND (
+        (status = 'PENDING' AND owner_id IS NULL AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
+     OR (status IN ('DOWNLOADING', 'STORING') AND (lease_expires_at IS NULL OR lease_expires_at <= ?))
+      )
+ORDER BY id ASC
+LIMIT ?;
