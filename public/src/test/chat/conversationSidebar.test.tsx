@@ -55,13 +55,13 @@ describe("ConversationSidebar", () => {
     expect(props.onSelect).toHaveBeenCalledWith("c");
   });
 
-  it("starts a new chat from an ember-accented, not ember-filled, button", () => {
+  it("starts a new chat from a quiet, unaccented button", () => {
     const { nav, props } = setup();
     const button = item(nav, "Start a new chat");
     expect(button).toHaveTextContent("New chat");
     const plate = button.querySelector('[data-chat-decor="plate"]');
-    expect(plate).toHaveAttribute("data-tone", "red");
-    expect(plate).toHaveAttribute("data-shadow", "ember");
+    expect(plate).toHaveAttribute("data-tone", "ink");
+    expect(plate).not.toHaveAttribute("data-shadow");
     fireEvent.click(button);
     expect(props.onNewChat).toHaveBeenCalledTimes(1);
   });

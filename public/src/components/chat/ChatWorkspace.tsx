@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { Menu } from "lucide-react";
+import { Menu, PanelLeft } from "lucide-react";
 import { ChatButton } from "@/components/chat/ChatButton";
 import { ChatTheme } from "@/components/chat/ChatTheme";
 import { ChatThread } from "@/components/chat/ChatThread";
@@ -22,6 +22,7 @@ export function ChatWorkspace() {
     useChat();
   const isMobile = useIsMobile();
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [railOpen, setRailOpen] = useState(true);
   const rootRef = useRef<HTMLDivElement>(null);
   useVisualViewportVars(rootRef);
 
@@ -44,7 +45,6 @@ export function ChatWorkspace() {
   return (
     <ChatTheme ref={rootRef} className="chat-root flex flex-col">
       <header className="chat-header">
-        <Decor shape="speedlines" className="chat-header-lines" />
         {isMobile ? (
           <ChatButton
             size="icon"
@@ -54,9 +54,18 @@ export function ChatWorkspace() {
           >
             <Menu aria-hidden="true" />
           </ChatButton>
-        ) : null}
+        ) : (
+          <ChatButton
+            size="icon"
+            aria-label={railOpen ? "Hide conversations" : "Show conversations"}
+            aria-expanded={railOpen}
+            onClick={() => setRailOpen((open) => !open)}
+          >
+            <PanelLeft aria-hidden="true" />
+          </ChatButton>
+        )}
         <Link to="/" aria-label="GoLoad home" className="chat-surface chat-brand chat-display">
-          <Decor shape="spike" tone="red" />
+          <Decor shape="panel" tone="red" />
           GOLOAD
         </Link>
         <h1 className="chat-title">{activeConversation.title}</h1>
@@ -67,14 +76,8 @@ export function ChatWorkspace() {
 
       <div className="chat-body flex min-h-0 flex-1">
         {/* The class "hidden md:flex" hides this before useIsMobile has measured. */}
-        {isMobile ? null : (
-          <aside className="chat-sidebar hidden md:flex">
-            <Decor shape="plate" tone="card" className="chat-sidebar-plate" />
-            {renderSidebar()}
-          </aside>
-        )}
+        {isMobile || !railOpen ? null : <aside className="chat-sidebar hidden md:flex">{renderSidebar()}</aside>}
         <main className="chat-main flex min-w-0 flex-1 flex-col">
-          <Decor shape="halftone" tone="ember" className="chat-wedge-tint hidden md:block" />
           <ChatThread
             conversationId={activeId}
             messages={activeConversation.messages}

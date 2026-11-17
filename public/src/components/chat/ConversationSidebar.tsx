@@ -13,9 +13,8 @@ export interface ConversationSidebarProps {
 }
 
 /**
- * The conversation list. Each row is a full-width rectangular button with a
- * sheared plate behind it. The active row carries the ember marker, one of
- * the three ember placements in the workspace.
+ * The conversation list: a straight rail of plain rows. The active row carries
+ * a small angled amber marker, which is where the tilt lives in this pane.
  */
 export function ConversationSidebar({
   conversations,
@@ -26,7 +25,7 @@ export function ConversationSidebar({
 }: ConversationSidebarProps) {
   return (
     <nav aria-label="Conversations" className="chat-nav">
-      <ChatButton tone="red" shadow="ember" aria-label="Start a new chat" className="chat-new" onClick={onNewChat}>
+      <ChatButton aria-label="Start a new chat" className="chat-new" onClick={onNewChat}>
         <Plus aria-hidden="true" />
         New chat
       </ChatButton>
@@ -35,18 +34,16 @@ export function ConversationSidebar({
           const active = conversation.id === activeId;
           return (
             <li key={conversation.id}>
-              <ChatButton
-                tone={active ? "scale" : "ink"}
+              <button
+                type="button"
                 aria-current={active ? "true" : undefined}
-                className="chat-nav-item"
+                className="chat-surface chat-nav-item"
                 onClick={() => onSelect(conversation.id)}
               >
-                {active ? (
-                  <Decor shape="plate" tone="ember" data-chat-active-marker="" className="chat-active-marker" />
-                ) : null}
+                {active ? <Decor shape="plate" tone="ember" data-chat-active-marker="" className="chat-active-marker" /> : null}
                 <span className="chat-nav-title">{conversation.title}</span>
                 {streamingIds.has(conversation.id) ? <span className="chat-nav-state chat-mono">replying</span> : null}
-              </ChatButton>
+              </button>
             </li>
           );
         })}

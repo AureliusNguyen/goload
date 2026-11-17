@@ -155,13 +155,13 @@ describe("ChatWorkspace", () => {
     expect(log().querySelector('[data-chat-decor="spike"]')).toBeNull();
     expect(nav().querySelector('[data-chat-decor="spike"]')).toBeNull();
 
-    // Ember fills: the send button plate and the active marker, nothing else.
+    // Amber fills: the send button plate and the active marker, nothing else.
     const emberPlates = [...container.querySelectorAll('[data-chat-decor="plate"][data-tone="ember"]')];
     expect(emberPlates).toHaveLength(2);
     expect(emberPlates.filter((plate) => plate.hasAttribute("data-chat-active-marker"))).toHaveLength(1);
     expect(emberPlates.filter((plate) => plate.closest("button") === sendButton())).toHaveLength(1);
-    // Ember texture: exactly one restrained tint.
-    expect(container.querySelectorAll('[data-chat-decor="halftone"][data-tone="ember"]')).toHaveLength(1);
+    // No textures at all: the halftone wedge and speedlines are gone.
+    expect(container.querySelectorAll('[data-chat-decor="halftone"], [data-chat-decor="speedlines"]')).toHaveLength(0);
   });
 });
 

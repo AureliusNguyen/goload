@@ -271,9 +271,6 @@
   gap: 16px;
   padding: 12px 16px;
 }
-.chat-theme .chat-header-lines {
-  opacity: 0.9;
-}
 .chat-theme .chat-brand {
   display: inline-flex;
   flex: none;
@@ -298,47 +295,25 @@
   font-size: 0.6875rem;
   color: hsl(var(--muted-foreground));
 }
-.chat-theme .chat-body {
-  container-type: size;
-}
 
-/* 8. Sidebar. Its backdrop is one big plate whose right edge is the diagonal
-      divider. Do not set display here: the element uses hidden md:flex. */
+/* 8. Sidebar: a straight rail with a 1px separator. Do not set display here:
+      the element uses hidden md:flex. */
 .chat-theme .chat-sidebar {
-  position: relative;
-  isolation: isolate;
-  z-index: 1;
   flex: none;
   flex-direction: column;
-  width: 18rem;
-  padding: 16px 12px 16px 16px;
-}
-.chat-theme .chat-sidebar-plate {
-  inset: 0 0 0 -8rem;
-  transform-origin: bottom right;
-  border-width: 0 var(--chat-edge) 0 0;
+  width: 16rem;
+  padding: 12px;
+  border-right: 1px solid var(--chat-line);
 }
 .chat-theme .chat-main {
   position: relative;
   isolation: isolate;
 }
-@media (min-width: 768px) {
-  /* Clear the wedge the sidebar plate leans into. 100cqh is the body height. */
-  .chat-theme .chat-main {
-    padding-left: calc(100cqh * var(--chat-slope));
-  }
-}
-/* The restrained ember tint: halftone dots inside the wedge triangle. */
-.chat-theme [data-chat-decor].chat-wedge-tint {
-  inset: 0 auto 0 0;
-  width: calc(100cqh * var(--chat-slope));
-  clip-path: polygon(100% 0, 0 100%, 100% 100%);
-}
 .chat-theme .chat-nav {
   display: flex;
   flex: 1;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
   min-height: 0;
 }
 .chat-theme .chat-new {
@@ -349,18 +324,34 @@
   display: flex;
   flex: 1;
   flex-direction: column;
-  gap: 10px;
+  gap: 2px;
   min-height: 0;
   margin: 0;
-  padding: 8px;
+  padding: 0;
   list-style: none;
 }
 .chat-theme .chat-nav-item {
-  width: 100%;
-  justify-content: flex-start;
+  display: flex;
+  align-items: center;
   gap: 10px;
-  padding-left: 26px;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 12px 8px 22px;
+  border: 0;
+  background: transparent;
+  color: var(--chat-muted);
+  font: inherit;
+  font-size: 0.875rem;
   text-align: left;
+  cursor: pointer;
+}
+.chat-theme .chat-nav-item:hover {
+  background: var(--chat-surface);
+  color: var(--chat-ash);
+}
+.chat-theme .chat-nav-item[aria-current="true"] {
+  background: var(--chat-surface);
+  color: var(--chat-ash);
 }
 .chat-theme .chat-nav-title {
   flex: 1;
@@ -372,12 +363,12 @@
 .chat-theme .chat-nav-state {
   flex: none;
   font-size: 0.6875rem;
-  color: hsl(var(--muted-foreground));
+  color: var(--chat-muted);
 }
 .chat-theme [data-chat-decor].chat-active-marker {
-  inset: 8px auto 8px 8px;
+  inset: 12px auto 12px 8px;
   z-index: 0;
-  width: 8px;
+  width: 4px;
   border: 0;
 }
 
