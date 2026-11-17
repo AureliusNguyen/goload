@@ -110,7 +110,7 @@ export function ChatThread({ conversationId, messages, onSuggestion, emptySlot }
         )}
       </div>
       {messages.length > 0 && !pinned ? (
-        <ChatButton shadow="ember" className="chat-jump" onClick={scrollToLatest}>
+        <ChatButton className="chat-jump" onClick={scrollToLatest}>
           <ArrowDown aria-hidden="true" />
           Jump to latest
         </ChatButton>

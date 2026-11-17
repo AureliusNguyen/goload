@@ -1,13 +1,11 @@
 import * as React from "react";
 
-export type DecorShape = "plate" | "panel" | "spike" | "halftone" | "speedlines";
+export type DecorShape = "plate" | "panel";
 export type DecorTone = "ink" | "card" | "red" | "scale" | "ember" | "ash";
-export type DecorShadow = "red" | "ember";
 
 export interface DecorProps extends Omit<React.HTMLAttributes<HTMLSpanElement>, "children"> {
   shape: DecorShape;
   tone?: DecorTone;
-  shadow?: DecorShadow;
 }
 
 /**
@@ -15,6 +13,6 @@ export interface DecorProps extends Omit<React.HTMLAttributes<HTMLSpanElement>, 
  * It sits behind the content of a .chat-surface parent, holds no text and is
  * never interactive, so reading stays horizontal and hit areas stay whole.
  */
-export function Decor({ shape, tone = "ink", shadow, ...props }: DecorProps) {
-  return <span {...props} aria-hidden="true" data-chat-decor={shape} data-tone={tone} data-shadow={shadow} />;
+export function Decor({ shape, tone = "ink", ...props }: DecorProps) {
+  return <span {...props} aria-hidden="true" data-chat-decor={shape} data-tone={tone} />;
 }

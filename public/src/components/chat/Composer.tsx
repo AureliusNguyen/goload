@@ -89,7 +89,7 @@ export function Composer({ busy, onSend, layout = "docked" }: ComposerProps) {
         <ul aria-label="Selected files" className="chat-chips">
           {attachments.map((file) => (
             <li key={file.id} className="chat-surface chat-chip">
-              <Decor shape="plate" tone="card" />
+              <Decor shape="panel" tone="card" />
               <span className="chat-chip-name" title={file.name}>
                 {file.name}
               </span>

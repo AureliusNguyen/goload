@@ -28,8 +28,6 @@
   --chat-cut: 14px;
 
   --chat-edge: 1px;
-  --chat-shadow: none;
-  --chat-shadow-ember: none;
 
   --chat-font-display: "Dela Gothic One", "Zen Kaku Gothic New", sans-serif;
   --chat-font-body: "Zen Kaku Gothic New", system-ui, sans-serif;
@@ -92,7 +90,7 @@
   color: var(--chat-ink);
 }
 
-/* 4. Focus: an outline, so a hard shadow (box-shadow) can never replace it.
+/* 4. Focus: an outline, so no fill or edge can replace it.
       Nothing focusable is ever clipped or sits inside a clipped element. */
 .chat-theme :is(a, button, input, textarea, select, summary, [tabindex]):focus-visible {
   outline: 3px solid var(--chat-ember);
@@ -114,13 +112,13 @@
   pointer-events: none;
   --decor-fill: var(--chat-ink);
   --decor-edge: var(--chat-line);
-  --decor-shadow: none;
 }
 .chat-theme [data-chat-decor][data-tone="card"] {
   --decor-fill: var(--chat-surface);
 }
 .chat-theme [data-chat-decor][data-tone="red"] {
   --decor-fill: var(--chat-red);
+  --decor-edge: var(--chat-red);
 }
 .chat-theme [data-chat-decor][data-tone="scale"] {
   --decor-fill: var(--chat-raised);
@@ -133,20 +131,16 @@
   --decor-fill: var(--chat-ash);
   --decor-edge: var(--chat-ash);
 }
-.chat-theme [data-chat-decor][data-shadow="red"] {
-  --decor-shadow: var(--chat-shadow);
-}
-.chat-theme [data-chat-decor][data-shadow="ember"] {
-  --decor-shadow: var(--chat-shadow-ember);
-}
 
-/* plate: a sheared parallelogram. For short, fixed-height things only
-   (buttons, list items, chips, the sidebar backdrop). */
+/* plate: a flat rectangle with a 1px edge. Only the amber and red plates (the
+   send button, the active marker, the wordmark) carry the shared tilt. */
 .chat-theme [data-chat-decor="plate"] {
-  transform: skewX(var(--chat-tilt));
   background: var(--decor-fill);
   border: var(--chat-edge) solid var(--decor-edge);
-  box-shadow: var(--decor-shadow);
+}
+.chat-theme [data-chat-decor="plate"][data-tone="ember"],
+.chat-theme [data-chat-decor="plate"][data-tone="red"] {
+  transform: skewX(var(--chat-tilt));
 }
 
 /* panel: a bounded rectangle with a 1px edge and ONE clipped corner (top
@@ -169,36 +163,6 @@
   background: var(--chat-red);
 }
 
-/* spike: the loud zigzag edge. At most one on screen. */
-.chat-theme [data-chat-decor="spike"] {
-  background: var(--decor-fill);
-  clip-path: polygon(
-    0 14%, 5% 0, 13% 11%, 22% 1%, 33% 12%, 45% 0, 56% 10%, 68% 2%, 79% 12%, 90% 0, 100% 13%,
-    100% 88%, 93% 100%, 82% 89%, 71% 100%, 59% 90%, 47% 100%, 35% 88%, 23% 100%, 11% 90%, 0 100%
-  );
-}
-
-/* textures */
-.chat-theme [data-chat-decor="halftone"] {
-  --decor-dot: var(--chat-red);
-  background-image: radial-gradient(
-    color-mix(in srgb, var(--decor-dot) 75%, transparent) 1.3px,
-    transparent 1.7px
-  );
-  background-size: 8px 8px;
-}
-.chat-theme [data-chat-decor="halftone"][data-tone="ember"] {
-  --decor-dot: var(--chat-ember);
-  opacity: 0.35;
-}
-.chat-theme [data-chat-decor="speedlines"] {
-  background-image: repeating-linear-gradient(
-    calc(90deg - var(--chat-tilt)),
-    transparent 0 16px,
-    color-mix(in srgb, var(--chat-ash) 9%, transparent) 16px 17px
-  );
-}
-
 /* 6. Buttons. The element stays an unclipped rectangle (hit area and focus
       outline); the sheared plate is a child layer. */
 .chat-theme .chat-btn,
@@ -210,7 +174,7 @@
   min-height: 44px;
   min-width: 44px;
   padding: 8px 16px;
-  font-weight: 700;
+  font-weight: 500;
 }
 .chat-theme .chat-btn[data-tone="red"],
 .chat-theme .chat-btn[data-tone="red"]:hover {
@@ -223,14 +187,16 @@
   color: var(--chat-ink);
 }
 .chat-theme .chat-btn [data-chat-decor="plate"] {
-  transition: translate 80ms ease-out, box-shadow 80ms ease-out;
+  transition: background-color 120ms ease-out, border-color 120ms ease-out;
 }
-.chat-theme .chat-btn:hover [data-chat-decor="plate"] {
-  translate: -1px -1px;
+.chat-theme .chat-btn:hover [data-chat-decor="plate"][data-tone="ink"] {
+  --decor-fill: var(--chat-surface);
+}
+.chat-theme .chat-btn:hover [data-chat-decor="plate"][data-tone="ember"] {
+  --decor-fill: #F6CC77;
 }
 .chat-theme .chat-btn:active [data-chat-decor="plate"] {
-  translate: 3px 3px;
-  box-shadow: none;
+  opacity: 0.85;
 }
 .chat-theme .chat-btn:disabled {
   color: hsl(var(--muted-foreground));
@@ -239,7 +205,6 @@
 .chat-theme .chat-btn:disabled [data-chat-decor="plate"] {
   --decor-fill: hsl(var(--muted));
   --decor-edge: var(--chat-line);
-  --decor-shadow: none;
 }
 
 /* 7. Workspace layout. Height follows the visual viewport so the phone
@@ -539,6 +504,7 @@
   list-style: none;
 }
 .chat-theme .chat-chip {
+  --chat-cut: 8px;
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -579,7 +545,6 @@
   width: min(20rem, 86vw);
   padding: 16px;
   border-right: var(--chat-edge) solid var(--chat-line);
-  box-shadow: var(--chat-shadow);
 }
 
 /* 12. Reduced motion: no typing caret blink, no press transitions. The static

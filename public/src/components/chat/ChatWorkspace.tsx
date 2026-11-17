@@ -74,7 +74,7 @@ export function ChatWorkspace() {
           </ChatButton>
         )}
         <Link to="/" aria-label="GoLoad home" className="chat-surface chat-brand chat-display">
-          <Decor shape="panel" tone="red" />
+          <Decor shape="plate" tone="red" />
           GOLOAD
         </Link>
         <h1 className="chat-title">{activeConversation.title}</h1>
