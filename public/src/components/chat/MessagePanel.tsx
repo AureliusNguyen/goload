@@ -8,14 +8,15 @@ export interface MessagePanelProps {
 }
 
 const SPEAKERS = {
-  user: { tab: "YOU", label: "You said", tone: "scale" },
-  assistant: { tab: "GOLOAD", label: "GoLoad said", tone: "card" },
+  user: { tab: "YOU", label: "You said" },
+  assistant: { tab: "GOLOAD", label: "GoLoad said" },
 } as const;
 
 /**
- * One turn of the conversation as a comic panel. The angled surface is a
- * decoration layer behind the content: the text, the code and the caret are
- * never transformed, so reading stays horizontal. Content is rendered as text
+ * One turn of the conversation. Assistant replies sit directly on the
+ * background; user turns get a quiet filled surface. Only the code block is a
+ * bounded panel (its clipped corner is a decoration layer, so the text, the
+ * code and the caret are never transformed). Content is rendered as text
  * nodes only, so markup typed by the user is shown literally.
  */
 export const MessagePanel = memo(function MessagePanel({ message }: MessagePanelProps) {
@@ -32,14 +33,14 @@ export const MessagePanel = memo(function MessagePanel({ message }: MessagePanel
       aria-busy={streaming ? true : undefined}
       data-role={message.role}
       data-status={message.status}
-      className="chat-surface chat-panel"
+      className="chat-panel"
     >
-      <Decor shape="panel" tone={speaker.tone} />
       <p className="chat-panel-tab chat-mono">{speaker.tab}</p>
       <div className="chat-panel-body">
         {segments.map((segment, index) =>
           segment.kind === "code" ? (
-            <figure key={index} className="chat-code">
+            <figure key={index} className="chat-surface chat-code">
+              <Decor shape="panel" tone="card" />
               <figcaption className="chat-mono">{segment.lang ?? "code"}</figcaption>
               <pre role="region" aria-label={`${segment.lang ?? "code"} code block`} tabIndex={0}>
                 <code>{segment.code}</code>

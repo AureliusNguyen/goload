@@ -25,9 +25,7 @@
 
   /* The one shared shear angle. Every cut, edge and texture derives from it. */
   --chat-tilt: -6deg;
-  --chat-slope: calc(tan(var(--chat-tilt)) * -1);
-  --chat-cut-w: 96px;
-  --chat-cut-h: calc(var(--chat-cut-w) * var(--chat-slope));
+  --chat-cut: 14px;
 
   --chat-edge: 1px;
   --chat-shadow: none;
@@ -151,24 +149,13 @@
   box-shadow: var(--decor-shadow);
 }
 
-/* panel: a rectangle with two corners cut on the tilt slope. For tall reading
-   boxes, where a full shear would push text outside the shape. The hard
-   shadow is a drop-shadow so it follows the cut corners. */
-.chat-theme [data-chat-decor="panel"] {
-  filter: none;
-}
+/* panel: a bounded rectangle with a 1px edge and ONE clipped corner (top
+   right). This is the single recognizable cut in the workspace. */
 .chat-theme [data-chat-decor="panel"]::before,
 .chat-theme [data-chat-decor="panel"]::after {
   content: "";
   position: absolute;
-  clip-path: polygon(
-    0 var(--chat-cut-h),
-    var(--chat-cut-w) 0,
-    100% 0,
-    100% calc(100% - var(--chat-cut-h)),
-    calc(100% - var(--chat-cut-w)) 100%,
-    0 100%
-  );
+  clip-path: polygon(0 0, calc(100% - var(--chat-cut)) 0, 100% var(--chat-cut), 100% 100%, 0 100%);
 }
 .chat-theme [data-chat-decor="panel"]::before {
   inset: 0;
@@ -177,6 +164,9 @@
 .chat-theme [data-chat-decor="panel"]::after {
   inset: var(--chat-edge);
   background: var(--decor-fill);
+}
+.chat-theme [data-chat-decor="panel"][data-tone="red"]::before {
+  background: var(--chat-red);
 }
 
 /* spike: the loud zigzag edge. At most one on screen. */
@@ -376,6 +366,11 @@
 .chat-theme .chat-thread {
   min-width: 0;
 }
+.chat-theme .chat-column {
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto;
+}
 .chat-theme .chat-empty {
   padding: 8px 0;
 }
@@ -407,25 +402,22 @@
   white-space: normal;
 }
 .chat-theme .chat-panel {
-  width: fit-content;
-  max-width: min(42rem, 100%);
-  padding: 18px 20px 20px;
+  width: 100%;
+  max-width: 100%;
 }
 .chat-theme .chat-panel[data-role="user"] {
+  width: fit-content;
+  max-width: min(36rem, 100%);
   margin-left: auto;
-}
-.chat-theme .chat-panel[data-role="assistant"] {
-  margin-right: auto;
+  padding: 10px 16px;
+  background: var(--chat-surface);
 }
 .chat-theme .chat-panel-tab {
-  margin: 0 0 8px;
+  margin: 0 0 6px;
   font-size: 0.6875rem;
-  font-weight: 700;
+  font-weight: 500;
   letter-spacing: 0.08em;
-  color: hsl(var(--muted-foreground));
-}
-.chat-theme .chat-panel[data-role="user"] .chat-panel-tab {
-  color: var(--chat-ash);
+  color: var(--chat-muted);
 }
 .chat-theme .chat-panel-body {
   display: flex;
@@ -433,7 +425,7 @@
   gap: 12px;
   min-width: 0;
   font-size: 1rem;
-  line-height: 1.65;
+  line-height: 1.7;
   overflow-wrap: anywhere;
 }
 .chat-theme .chat-text {
@@ -442,17 +434,15 @@
 }
 .chat-theme .chat-code {
   min-width: 0;
-  margin: 0;
-  border: 2px solid var(--chat-ash);
-  background: var(--chat-ink);
+  margin: 4px 0;
 }
 .chat-theme .chat-code figcaption {
-  padding: 4px 10px;
-  border-bottom: 2px solid var(--chat-ash);
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--chat-line);
   font-size: 0.6875rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: hsl(var(--muted-foreground));
+  color: var(--chat-muted);
 }
 .chat-theme .chat-code pre {
   margin: 0;
@@ -468,7 +458,7 @@
   display: inline-block;
   width: 0.6em;
   height: 1.1em;
-  background: var(--chat-ash);
+  background: var(--chat-ember);
   vertical-align: text-bottom;
   animation: chat-caret-blink 1s steps(1) infinite;
 }

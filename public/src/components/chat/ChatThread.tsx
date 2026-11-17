@@ -99,7 +99,7 @@ export function ChatThread({ conversationId, messages, onSuggestion }: ChatThrea
             </ul>
           </div>
         ) : (
-          <div role="log" aria-label="Messages" className="mx-auto flex w-full max-w-3xl flex-col gap-8">
+          <div role="log" aria-label="Messages" className="chat-column flex flex-col gap-8">
             {messages.map((message) => (
               <MessagePanel key={message.id} message={message} />
             ))}
