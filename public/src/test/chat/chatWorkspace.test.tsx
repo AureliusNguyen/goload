@@ -116,6 +116,15 @@ describe("ChatWorkspace", () => {
     expect(reply).not.toHaveAttribute("aria-busy");
   });
 
+  it("keeps an unsent draft when switching between an empty and a non-empty conversation", () => {
+    renderWorkspace();
+    fireEvent.change(textbox(), { target: { value: "half-typed idea" } });
+    fireEvent.click(within(nav()).getByRole("button", { name: /Older chat/ }));
+    expect(textbox()).toHaveValue("half-typed idea");
+    fireEvent.click(within(nav()).getByRole("button", { name: "New chat" }));
+    expect(textbox()).toHaveValue("half-typed idea");
+  });
+
   it("starts a new chat with the intro state and moves the active marker", () => {
     renderWorkspace();
     fireEvent.click(within(nav()).getByRole("button", { name: /Older chat/ }));

@@ -23,6 +23,9 @@ export function ChatWorkspace() {
   const isMobile = useIsMobile();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [railOpen, setRailOpen] = useState(true);
+  // The composer remounts when the thread flips between empty and non-empty
+  // (it moves between the intro slot and the dock), so the draft lives here.
+  const [draft, setDraft] = useState("");
   const rootRef = useRef<HTMLDivElement>(null);
   useVisualViewportVars(rootRef);
 
@@ -46,6 +49,8 @@ export function ChatWorkspace() {
   const composer = (
     <Composer
       layout={empty ? "centered" : "docked"}
+      draft={draft}
+      onDraftChange={setDraft}
       busy={streamingIds.has(activeId)}
       onSend={(text) => sendMessage(activeId, text)}
     />

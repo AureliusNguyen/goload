@@ -12,6 +12,9 @@ export interface ComposerProps {
   onSend: (text: string) => boolean;
   /** "centered" sits in the empty state under the heading; "docked" is below the thread. */
   layout?: "centered" | "docked";
+  /** Optional controlled draft. The owner keeps it so a remount cannot drop it. */
+  draft?: string;
+  onDraftChange?: (text: string) => void;
 }
 
 export const STATUS_BUSY = "GoLoad is replying. Sending is paused until this reply finishes.";
@@ -27,8 +30,11 @@ export const STATUS_IDLE = "Enter to send. Shift+Enter for a new line.";
  * "Not uploaded". File contents are never read and nothing is sent with the
  * message.
  */
-export function Composer({ busy, onSend, layout = "docked" }: ComposerProps) {
-  const [value, setValue] = useState("");
+export function Composer({ busy, onSend, layout = "docked", draft, onDraftChange }: ComposerProps) {
+  const [localValue, setLocalValue] = useState("");
+  const controlled = draft !== undefined && onDraftChange !== undefined;
+  const value = controlled ? draft : localValue;
+  const setValue = controlled ? onDraftChange : setLocalValue;
   const [attachments, setAttachments] = useState<AttachmentStub[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
