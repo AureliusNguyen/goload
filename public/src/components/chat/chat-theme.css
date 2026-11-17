@@ -1,4 +1,4 @@
-@import url("https://fonts.googleapis.com/css2?family=Dela+Gothic+One&family=JetBrains+Mono:wght@400;700&family=Zen+Kaku+Gothic+New:wght@400;500;700;900&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Dela+Gothic+One&family=Geist:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap");
 
 /*
  * Chat workspace theme, used by the /app route only.
@@ -29,8 +29,8 @@
 
   --chat-edge: 1px;
 
-  --chat-font-display: "Dela Gothic One", "Zen Kaku Gothic New", sans-serif;
-  --chat-font-body: "Zen Kaku Gothic New", system-ui, sans-serif;
+  --chat-font-display: "Dela Gothic One", "Geist", sans-serif;
+  --chat-font-body: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif;
   --chat-font-mono: "JetBrains Mono", ui-monospace, monospace;
 
   /* shadcn tokens for this subtree only. HSL channel triplets, because
@@ -223,8 +223,9 @@
   display: flex;
   flex: none;
   align-items: center;
-  gap: 16px;
-  padding: 12px 16px;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--chat-line);
 }
 .chat-theme .chat-brand {
   display: inline-flex;
@@ -232,8 +233,8 @@
   align-items: center;
   min-height: 44px;
   padding: 6px 18px;
-  color: hsl(var(--primary-foreground));
-  font-size: 1.25rem;
+  color: #fff;
+  font-size: 1.05rem;
   text-decoration: none;
 }
 .chat-theme .chat-title {
@@ -241,8 +242,8 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 1rem;
-  font-weight: 700;
+  font-size: 0.9375rem;
+  font-weight: 500;
 }
 .chat-theme .chat-preview-note {
   flex: none;

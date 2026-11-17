@@ -137,7 +137,7 @@ export function Composer({ busy, onSend, layout = "docked" }: ComposerProps) {
           </ChatButton>
         </div>
       </div>
-      <p role="status" className="chat-composer-status chat-mono">
+      <p role="status" className="chat-composer-status">
         {status}
       </p>
     </form>

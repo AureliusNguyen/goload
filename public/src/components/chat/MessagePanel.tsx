@@ -35,7 +35,7 @@ export const MessagePanel = memo(function MessagePanel({ message }: MessagePanel
       data-status={message.status}
       className="chat-panel"
     >
-      <p className="chat-panel-tab chat-mono">{speaker.tab}</p>
+      <p className="chat-panel-tab">{speaker.tab}</p>
       <div className="chat-panel-body">
         {segments.map((segment, index) =>
           segment.kind === "code" ? (

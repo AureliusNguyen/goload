@@ -76,7 +76,7 @@ describe("chat theme scope", () => {
 
   it("leaves the shared stylesheet and tailwind config free of chat tokens", () => {
     for (const file of ["src/index.css", "tailwind.config.ts", "index.html"]) {
-      expect(read(file)).not.toMatch(/chat-theme|--chat-|Dela Gothic|Zen Kaku|JetBrains/);
+      expect(read(file)).not.toMatch(/chat-theme|--chat-|Dela Gothic|Geist|JetBrains/);
     }
   });
 
@@ -95,7 +95,7 @@ describe("chat theme scope", () => {
       "#F2BE54",
       "#D7261E",
       "Dela Gothic One",
-      "Zen Kaku Gothic New",
+      "Geist",
       "JetBrains Mono",
     ]) {
       expect(lower).toContain(value.toLowerCase());

@@ -42,7 +42,7 @@ export function ConversationSidebar({
               >
                 {active ? <Decor shape="plate" tone="ember" data-chat-active-marker="" className="chat-active-marker" /> : null}
                 <span className="chat-nav-title">{conversation.title}</span>
-                {streamingIds.has(conversation.id) ? <span className="chat-nav-state chat-mono">replying</span> : null}
+                {streamingIds.has(conversation.id) ? <span className="chat-nav-state">replying</span> : null}
               </button>
             </li>
           );

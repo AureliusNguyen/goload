@@ -78,7 +78,7 @@ export function ChatWorkspace() {
           GOLOAD
         </Link>
         <h1 className="chat-title">{activeConversation.title}</h1>
-        <p className="chat-preview-note chat-mono">
+        <p className="chat-preview-note">
           PREVIEW<span className="hidden sm:inline">: simulated replies, nothing is downloaded or uploaded</span>
         </p>
       </header>
