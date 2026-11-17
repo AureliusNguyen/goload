@@ -47,7 +47,7 @@ type attemptFixture struct {
 	reconcile task.ReconcileRepository
 	outbox    task.OutboxRepository
 	tx        task.TxManager
-	svc       task.AttemptService
+	svc       *task.AttemptService
 }
 
 func newAttemptFixture(t *testing.T) *attemptFixture {
@@ -92,13 +92,13 @@ func (f *attemptFixture) unsent(t *testing.T) []task.OutboxEvent {
 }
 
 // claimStoring claims the task for workerID and moves the attempt to STORING.
-func (f *attemptFixture) claimStoring(t *testing.T, taskID uint64, workerID string) *task.Attempt {
+func (f *attemptFixture) claimStoring(t *testing.T, taskID uint64, workerID string) *events.Attempt {
 	t.Helper()
 
 	ctx := context.Background()
 	attempt, err := f.svc.ClaimTask(ctx, taskID, workerID)
 	require.NoError(t, err)
-	_, err = f.svc.RenewLease(ctx, taskID, workerID, attempt.Generation, task.LeaseUpdate{Storing: true})
+	_, err = f.svc.RenewLease(ctx, taskID, workerID, attempt.Generation, events.LeaseUpdate{Storing: true})
 	require.NoError(t, err)
 	return attempt
 }
@@ -106,14 +106,14 @@ func (f *attemptFixture) claimStoring(t *testing.T, taskID uint64, workerID stri
 // takeOver stages the fencing scenario: worker-a claims generation 1 and
 // reports progress, then stops renewing (alive but blocked) until its lease
 // has expired; worker-b claims generation 2 and moves to STORING.
-func (f *attemptFixture) takeOver(t *testing.T, taskID uint64) (stale, winner *task.Attempt) {
+func (f *attemptFixture) takeOver(t *testing.T, taskID uint64) (stale, winner *events.Attempt) {
 	t.Helper()
 
 	ctx := context.Background()
 	stale, err := f.svc.ClaimTask(ctx, taskID, "worker-a")
 	require.NoError(t, err)
-	progress := task.DownloadProgress{Progress: 40, DownloadedBytes: 400, TotalBytes: 1000}
-	_, err = f.svc.RenewLease(ctx, taskID, "worker-a", stale.Generation, task.LeaseUpdate{Progress: &progress})
+	progress := events.AttemptProgress{Progress: 40, DownloadedBytes: 400, TotalBytes: 1000}
+	_, err = f.svc.RenewLease(ctx, taskID, "worker-a", stale.Generation, events.LeaseUpdate{Progress: &progress})
 	require.NoError(t, err)
 
 	f.clock.Advance(task.DefaultLeaseDuration)
@@ -124,12 +124,12 @@ func (f *attemptFixture) takeOver(t *testing.T, taskID uint64) (stale, winner *t
 
 // attemptResult is the result an attempt reports: its own generation-scoped
 // storage key and a checksum that differs per generation.
-func attemptResult(taskID, generation uint64) task.AttemptResult {
-	return task.AttemptResult{
+func attemptResult(taskID, generation uint64) events.AttemptResult {
+	return events.AttemptResult{
 		FileName:    "resolved.bin",
 		FileSize:    1000,
 		ContentType: "application/octet-stream",
-		Checksum:    &task.ChecksumInfo{ChecksumType: "md5", ChecksumValue: fmt.Sprintf("sum-%d", generation)},
+		Checksum:    &events.ChecksumInfo{ChecksumType: "md5", ChecksumValue: fmt.Sprintf("sum-%d", generation)},
 		StorageType: storage.TypeLocal,
 		StorageKey:  fmt.Sprintf("%d/%d/resolved-0011223344556677.bin", taskID, generation),
 	}
@@ -168,7 +168,7 @@ func TestClaimTask_LiveLeaseIsNotClaimable(t *testing.T) {
 	f.clock.Advance(task.DefaultLeaseDuration - time.Nanosecond)
 	_, err = f.svc.ClaimTask(ctx, id, "worker-b")
 
-	require.ErrorIs(t, err, task.ErrTaskNotClaimable)
+	require.ErrorIs(t, err, events.ErrTaskNotClaimable)
 	require.True(t, apperrors.IsError(err, apperrors.ErrCodeInvalidState))
 	st := f.state(t, id)
 	require.Equal(t, "worker-a", st.OwnerID)
@@ -183,8 +183,8 @@ func TestClaimTask_ExpiredLeaseIsReclaimedFromZero(t *testing.T) {
 	ctx := context.Background()
 	first, err := f.svc.ClaimTask(ctx, id, "worker-a")
 	require.NoError(t, err)
-	progress := task.DownloadProgress{Progress: 40, DownloadedBytes: 400, TotalBytes: 1000}
-	_, err = f.svc.RenewLease(ctx, id, "worker-a", first.Generation, task.LeaseUpdate{Progress: &progress})
+	progress := events.AttemptProgress{Progress: 40, DownloadedBytes: 400, TotalBytes: 1000}
+	_, err = f.svc.RenewLease(ctx, id, "worker-a", first.Generation, events.LeaseUpdate{Progress: &progress})
 	require.NoError(t, err)
 
 	f.clock.Advance(task.DefaultLeaseDuration)
@@ -212,7 +212,7 @@ func TestAttemptService_RejectsEmptyWorkerID(t *testing.T) {
 	ctx := context.Background()
 
 	_, claimErr := f.svc.ClaimTask(ctx, id, "")
-	_, renewErr := f.svc.RenewLease(ctx, id, "", 1, task.LeaseUpdate{})
+	_, renewErr := f.svc.RenewLease(ctx, id, "", 1, events.LeaseUpdate{})
 	for name, err := range map[string]error{
 		"claim":    claimErr,
 		"renew":    renewErr,
@@ -233,16 +233,16 @@ func TestRenewLease_ExtendsLeaseAndRecordsProgressAndStoring(t *testing.T) {
 	require.NoError(t, err)
 
 	f.clock.Advance(20 * time.Second)
-	progress := task.DownloadProgress{Progress: 25, DownloadedBytes: 250, TotalBytes: 1000}
+	progress := events.AttemptProgress{Progress: 25, DownloadedBytes: 250, TotalBytes: 1000}
 	lease, err := f.svc.RenewLease(ctx, id, "worker-a", attempt.Generation,
-		task.LeaseUpdate{Progress: &progress, Storing: true})
+		events.LeaseUpdate{Progress: &progress, Storing: true})
 	require.NoError(t, err)
 
 	wantLease := f.clock.Now().Add(task.DefaultLeaseDuration)
 	require.True(t, wantLease.Equal(lease))
 	st := f.state(t, id)
 	require.Equal(t, task.StatusStoring, st.Status)
-	require.Equal(t, progress, st.Progress)
+	require.Equal(t, task.DownloadProgress(progress), st.Progress)
 	require.NotNil(t, st.LeaseExpiresAt)
 	require.True(t, wantLease.Equal(*st.LeaseExpiresAt))
 	require.Equal(t, uint64(1), st.Generation)
@@ -266,7 +266,7 @@ func TestCompleteAttempt_CommitsResultAndLifecycleEventTogether(t *testing.T) {
 	require.Equal(t, result.StorageKey, st.StoragePath)
 	require.Equal(t, storage.TypeLocal, st.StorageType)
 	require.Equal(t, "resolved.bin", st.FileName)
-	require.Equal(t, result.Checksum, st.Checksum)
+	require.Equal(t, &task.ChecksumInfo{ChecksumType: result.Checksum.ChecksumType, ChecksumValue: result.Checksum.ChecksumValue}, st.Checksum)
 	require.Equal(t, task.DownloadProgress{Progress: 100, DownloadedBytes: 1000, TotalBytes: 1000}, st.Progress)
 	require.NotNil(t, st.CompletedAt)
 	require.True(t, f.clock.Now().Equal(*st.CompletedAt))
@@ -347,7 +347,7 @@ func TestCompleteAttempt_RequiresStoring(t *testing.T) {
 
 	err = f.svc.CompleteAttempt(ctx, id, "worker-a", attempt.Generation, attemptResult(id, attempt.Generation))
 
-	require.ErrorIs(t, err, task.ErrAttemptRejected)
+	require.ErrorIs(t, err, events.ErrAttemptRejected)
 	require.Equal(t, task.StatusDownloading, f.state(t, id).Status)
 	require.Empty(t, f.unsent(t))
 }
@@ -389,23 +389,23 @@ func TestFencing_StaleWorkerCannotTouchWinnersResult(t *testing.T) {
 	require.NoError(t, f.svc.CompleteAttempt(ctx, id, "worker-b", winner.Generation, winnerResult))
 	committed := f.state(t, id)
 
-	_, renewErr := f.svc.RenewLease(ctx, id, "worker-a", stale.Generation, task.LeaseUpdate{})
+	_, renewErr := f.svc.RenewLease(ctx, id, "worker-a", stale.Generation, events.LeaseUpdate{})
 	for name, err := range map[string]error{
 		"renew":    renewErr,
 		"complete": f.svc.CompleteAttempt(ctx, id, "worker-a", stale.Generation, attemptResult(id, stale.Generation)),
 		"fail":     f.svc.FailAttempt(ctx, id, "worker-a", stale.Generation, errors.New("stale failure")),
 		"release":  f.svc.ReleaseAttempt(ctx, id, "worker-a", stale.Generation),
 	} {
-		require.ErrorIs(t, err, task.ErrAttemptRejected, name)
+		require.ErrorIs(t, err, events.ErrAttemptRejected, name)
 		require.True(t, apperrors.IsError(err, apperrors.ErrCodeConflict), name)
 	}
 	// It cannot claim the completed task again either.
 	_, err := f.svc.ClaimTask(ctx, id, "worker-a")
-	require.ErrorIs(t, err, task.ErrTaskNotClaimable)
+	require.ErrorIs(t, err, events.ErrTaskNotClaimable)
 
 	require.Equal(t, committed, f.state(t, id), "worker-b's result must be untouched")
 	require.Equal(t, winnerResult.StorageKey, committed.StoragePath)
-	require.Equal(t, winnerResult.Checksum, committed.Checksum)
+	require.Equal(t, &task.ChecksumInfo{ChecksumType: winnerResult.Checksum.ChecksumType, ChecksumValue: winnerResult.Checksum.ChecksumValue}, committed.Checksum)
 	rows := f.unsent(t)
 	require.Len(t, rows, 1, "exactly one completion event: worker-b's")
 	var payload events.TaskCompletedEvent
@@ -424,11 +424,11 @@ func TestFencing_StaleFailureAndProgressAreRejectedAfterCompletion(t *testing.T)
 	committed := f.state(t, id)
 
 	failErr := f.svc.FailAttempt(ctx, id, "worker-a", stale.Generation, errors.New("stale failure"))
-	regress := task.DownloadProgress{Progress: 10, DownloadedBytes: 100, TotalBytes: 1000}
-	_, progressErr := f.svc.RenewLease(ctx, id, "worker-a", stale.Generation, task.LeaseUpdate{Progress: &regress})
+	regress := events.AttemptProgress{Progress: 10, DownloadedBytes: 100, TotalBytes: 1000}
+	_, progressErr := f.svc.RenewLease(ctx, id, "worker-a", stale.Generation, events.LeaseUpdate{Progress: &regress})
 
-	require.ErrorIs(t, failErr, task.ErrAttemptRejected)
-	require.ErrorIs(t, progressErr, task.ErrAttemptRejected)
+	require.ErrorIs(t, failErr, events.ErrAttemptRejected)
+	require.ErrorIs(t, progressErr, events.ErrAttemptRejected)
 	after := f.state(t, id)
 	require.Equal(t, committed, after)
 	require.Equal(t, task.StatusCompleted, after.Status, "no overwrite to FAILED")
@@ -442,18 +442,18 @@ func TestFencing_StaleProgressCannotMoveLiveAttempt(t *testing.T) {
 	id := f.newTask(t)
 	ctx := context.Background()
 	stale, winner := f.takeOver(t, id)
-	live := task.DownloadProgress{Progress: 10, DownloadedBytes: 100, TotalBytes: 1000}
-	_, err := f.svc.RenewLease(ctx, id, "worker-b", winner.Generation, task.LeaseUpdate{Progress: &live})
+	live := events.AttemptProgress{Progress: 10, DownloadedBytes: 100, TotalBytes: 1000}
+	_, err := f.svc.RenewLease(ctx, id, "worker-b", winner.Generation, events.LeaseUpdate{Progress: &live})
 	require.NoError(t, err)
 
-	ahead := task.DownloadProgress{Progress: 90, DownloadedBytes: 900, TotalBytes: 1000}
-	_, progressErr := f.svc.RenewLease(ctx, id, "worker-a", stale.Generation, task.LeaseUpdate{Progress: &ahead})
+	ahead := events.AttemptProgress{Progress: 90, DownloadedBytes: 900, TotalBytes: 1000}
+	_, progressErr := f.svc.RenewLease(ctx, id, "worker-a", stale.Generation, events.LeaseUpdate{Progress: &ahead})
 	failErr := f.svc.FailAttempt(ctx, id, "worker-a", stale.Generation, errors.New("stale failure"))
 
-	require.ErrorIs(t, progressErr, task.ErrAttemptRejected)
-	require.ErrorIs(t, failErr, task.ErrAttemptRejected)
+	require.ErrorIs(t, progressErr, events.ErrAttemptRejected)
+	require.ErrorIs(t, failErr, events.ErrAttemptRejected)
 	st := f.state(t, id)
-	require.Equal(t, live, st.Progress)
+	require.Equal(t, task.DownloadProgress(live), st.Progress)
 	require.Equal(t, "worker-b", st.OwnerID)
 	require.Equal(t, task.StatusStoring, st.Status)
 	require.Zero(t, st.RetryCount)
@@ -495,8 +495,8 @@ func TestCompleteAttempt_RetryWithOtherGenerationOrResultIsRejected(t *testing.T
 	otherResultErr := f.svc.CompleteAttempt(ctx, id, "worker-a", attempt.Generation, other)
 	otherGenerationErr := f.svc.CompleteAttempt(ctx, id, "worker-a", attempt.Generation+1, result)
 
-	require.ErrorIs(t, otherResultErr, task.ErrAttemptRejected)
-	require.ErrorIs(t, otherGenerationErr, task.ErrAttemptRejected)
+	require.ErrorIs(t, otherResultErr, events.ErrAttemptRejected)
+	require.ErrorIs(t, otherGenerationErr, events.ErrAttemptRejected)
 	require.Equal(t, committed, f.state(t, id))
 	require.Len(t, f.unsent(t), 1)
 }
@@ -528,8 +528,8 @@ func TestCompleteAttempt_RetryWithOtherContentTypeOrSizeIsRejected(t *testing.T)
 	otherSize := result
 	otherSize.FileSize = result.FileSize + 1
 
-	require.ErrorIs(t, f.svc.CompleteAttempt(ctx, id, "worker-a", attempt.Generation, otherType), task.ErrAttemptRejected)
-	require.ErrorIs(t, f.svc.CompleteAttempt(ctx, id, "worker-a", attempt.Generation, otherSize), task.ErrAttemptRejected)
+	require.ErrorIs(t, f.svc.CompleteAttempt(ctx, id, "worker-a", attempt.Generation, otherType), events.ErrAttemptRejected)
+	require.ErrorIs(t, f.svc.CompleteAttempt(ctx, id, "worker-a", attempt.Generation, otherSize), events.ErrAttemptRejected)
 	require.Equal(t, committed, f.state(t, id), "a rejected retry must not change the result")
 	require.Len(t, f.unsent(t), 1)
 
@@ -557,7 +557,7 @@ func TestCompleteAttempt_EmptyFileRetryIsIdempotent(t *testing.T) {
 
 	nonEmpty := result
 	nonEmpty.FileSize = 5
-	require.ErrorIs(t, f.svc.CompleteAttempt(ctx, id, "worker-a", attempt.Generation, nonEmpty), task.ErrAttemptRejected)
+	require.ErrorIs(t, f.svc.CompleteAttempt(ctx, id, "worker-a", attempt.Generation, nonEmpty), events.ErrAttemptRejected)
 }
 
 func TestFailAttempt_RetriesWithBackoffThenTerminal(t *testing.T) {
@@ -586,7 +586,7 @@ func TestFailAttempt_RetriesWithBackoffThenTerminal(t *testing.T) {
 		// Not claimable until the backoff has fully passed.
 		f.clock.Advance(task.DefaultRetryBackoff(retry) - time.Nanosecond)
 		_, err = f.svc.ClaimTask(ctx, id, "worker-b")
-		require.ErrorIs(t, err, task.ErrTaskNotClaimable)
+		require.ErrorIs(t, err, events.ErrTaskNotClaimable)
 		f.clock.Advance(time.Nanosecond)
 	}
 
@@ -603,7 +603,7 @@ func TestFailAttempt_RetriesWithBackoffThenTerminal(t *testing.T) {
 	require.NotNil(t, st.ErrorMessage)
 	require.Equal(t, "still broken", *st.ErrorMessage)
 	_, err = f.svc.ClaimTask(ctx, id, "worker-a")
-	require.ErrorIs(t, err, task.ErrTaskNotClaimable)
+	require.ErrorIs(t, err, events.ErrTaskNotClaimable)
 	require.Empty(t, f.unsent(t), "failures write no outbox event")
 }
 
@@ -643,7 +643,7 @@ func TestReleaseAttempt_ReturnsTaskToPendingImmediatelyClaimable(t *testing.T) {
 
 	// The released attempt is fenced out like any other stale attempt.
 	err = f.svc.ReleaseAttempt(ctx, id, "worker-a", attempt.Generation)
-	require.ErrorIs(t, err, task.ErrAttemptRejected)
+	require.ErrorIs(t, err, events.ErrAttemptRejected)
 }
 
 func TestClaimTask_ConcurrentClaimsExactlyOneWins(t *testing.T) {
@@ -668,7 +668,7 @@ func TestClaimTask_ConcurrentClaimsExactlyOneWins(t *testing.T) {
 			won++
 			continue
 		}
-		require.ErrorIs(t, err, task.ErrTaskNotClaimable,
+		require.ErrorIs(t, err, events.ErrTaskNotClaimable,
 			"a losing claim must be a clean rejection, not a database error")
 	}
 	require.Equal(t, 1, won)

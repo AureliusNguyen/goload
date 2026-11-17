@@ -106,7 +106,7 @@ type pocketPipeline struct {
 	pub       message.Publisher
 	reconcile task.ReconcileRepository
 	// rawAttempts is the real ownership API, never gated.
-	rawAttempts task.AttemptService
+	rawAttempts *task.AttemptService
 	// gate sits between the worker and rawAttempts when pipelineOpts.gated.
 	gate     *attemptGate
 	dataDir  string
@@ -202,9 +202,9 @@ func startPipeline(t *testing.T, dl download.Downloader, o pipelineOpts) *pocket
 		dataDir:     o.dataDir,
 		workerID:    o.workerID,
 	}
-	workerAttempts := attemptSvc
+	var workerAttempts download.AttemptCoordinator = attemptSvc
 	if o.gated {
-		p.gate = &attemptGate{inner: attemptSvc}
+		p.gate = &attemptGate{inner: workerAttempts}
 		workerAttempts = p.gate
 	}
 
@@ -212,7 +212,7 @@ func startPipeline(t *testing.T, dl download.Downloader, o pipelineOpts) *pocket
 		store,
 		download.NewDownloadEventPublisher(pub),
 		download.WithStorageType(storage.TypeLocal),
-		download.WithAttempts(workerAttempts, o.workerID),
+		download.WithAttemptCoordinator(workerAttempts, o.workerID),
 	)
 	dlSvc.RegisterDownloader("HTTPS", dl)
 	worker := downloadtransport.NewEventConsumer(dlSvc, sub, logger, downloadtransport.WithAttemptRunner(dlSvc))

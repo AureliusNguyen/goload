@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
+	"github.com/yuisofull/goload/internal/events"
 	"github.com/yuisofull/goload/internal/storage"
 )
 
@@ -56,11 +57,11 @@ func TestNewTaskCompletedOutboxEvent_Payload(t *testing.T) {
 	before := time.Now().UTC()
 	completedAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 
-	event, err := NewTaskCompletedOutboxEvent(42, AttemptResult{
+	event, err := NewTaskCompletedOutboxEvent(42, events.AttemptResult{
 		FileName:    "resolved.bin",
 		FileSize:    1000,
 		ContentType: "application/octet-stream",
-		Checksum:    &ChecksumInfo{ChecksumType: "md5", ChecksumValue: "abc123"},
+		Checksum:    &events.ChecksumInfo{ChecksumType: "md5", ChecksumValue: "abc123"},
 		StorageType: storage.TypeLocal,
 		StorageKey:  "42/1/resolved-0011223344556677.bin",
 	}, completedAt)
@@ -86,7 +87,7 @@ func TestNewTaskCompletedOutboxEvent_Payload(t *testing.T) {
 }
 
 func TestNewTaskCompletedOutboxEvent_OmitsMissingChecksum(t *testing.T) {
-	event, err := NewTaskCompletedOutboxEvent(7, AttemptResult{
+	event, err := NewTaskCompletedOutboxEvent(7, events.AttemptResult{
 		StorageType: storage.TypeMinio,
 		StorageKey:  "7/2/file-0011223344556677.bin",
 	}, time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))

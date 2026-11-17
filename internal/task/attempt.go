@@ -2,11 +2,11 @@ package task
 
 import (
 	"context"
-	stderrors "errors"
 	"fmt"
 	"time"
 
 	"github.com/yuisofull/goload/internal/errors"
+	"github.com/yuisofull/goload/internal/events"
 	"github.com/yuisofull/goload/internal/storage"
 )
 
@@ -17,17 +17,6 @@ const (
 	DefaultRetryBackoffBase = 5 * time.Second
 	// DefaultRetryBackoffMax caps the delay between automatic retries.
 	DefaultRetryBackoffMax = 5 * time.Minute
-)
-
-var (
-	// ErrTaskNotClaimable is the cause of a rejected ClaimTask: the task is
-	// terminal, paused, failed, waiting for a retry that is not due yet, or
-	// leased by a live attempt. The worker drops the delivery.
-	ErrTaskNotClaimable = stderrors.New("task is not claimable")
-	// ErrAttemptRejected is the cause of every fencing rejection: the caller
-	// is not the current owner and generation, its lease expired, or the task
-	// left the owned states. The worker must stop and never force its result.
-	ErrAttemptRejected = stderrors.New("attempt rejected")
 )
 
 // AttemptState is the ownership view of one task row. The task service loads
@@ -70,34 +59,6 @@ type AttemptState struct {
 	CompletedAt  *time.Time
 }
 
-// Attempt is one successful claim: the fencing token and its lease.
-type Attempt struct {
-	TaskID         uint64
-	WorkerID       string
-	Generation     uint64
-	LeaseExpiresAt time.Time
-}
-
-// LeaseUpdate is what a heartbeat may carry besides the renewal itself.
-type LeaseUpdate struct {
-	// Progress, when set, replaces the task's progress.
-	Progress *DownloadProgress
-	// Storing reports that the attempt began writing to storage
-	// (DOWNLOADING -> STORING). It is required before CompleteAttempt.
-	Storing bool
-}
-
-// AttemptResult is what a finished attempt reports to CompleteAttempt.
-type AttemptResult struct {
-	FileName    string
-	FileSize    int64
-	ContentType string
-	Checksum    *ChecksumInfo
-	StorageType storage.Type
-	// StorageKey is the attempt's own generation-scoped storage key.
-	StorageKey string
-}
-
 // AttemptRepository loads and stores the ownership state of task rows.
 type AttemptRepository interface {
 	// GetAttemptState reads the state without locking. It returns
@@ -131,7 +92,7 @@ func notClaimable(format string, args ...any) error {
 	return &errors.Error{
 		Code:    errors.ErrCodeInvalidState,
 		Message: fmt.Sprintf(format, args...),
-		Cause:   ErrTaskNotClaimable,
+		Cause:   events.ErrTaskNotClaimable,
 	}
 }
 
@@ -139,7 +100,7 @@ func attemptRejected(format string, args ...any) error {
 	return &errors.Error{
 		Code:    errors.ErrCodeConflict,
 		Message: fmt.Sprintf(format, args...),
-		Cause:   ErrAttemptRejected,
+		Cause:   events.ErrAttemptRejected,
 	}
 }
 
@@ -218,7 +179,7 @@ func (st *AttemptState) renew(
 	generation uint64,
 	now time.Time,
 	lease time.Duration,
-	update LeaseUpdate,
+	update events.LeaseUpdate,
 ) error {
 	if err := st.checkOwned(workerID, generation, now); err != nil {
 		return err
@@ -229,7 +190,11 @@ func (st *AttemptState) renew(
 		st.Status = StatusStoring
 	}
 	if update.Progress != nil {
-		st.Progress = *update.Progress
+		st.Progress = DownloadProgress{
+			Progress:        update.Progress.Progress,
+			DownloadedBytes: update.Progress.DownloadedBytes,
+			TotalBytes:      update.Progress.TotalBytes,
+		}
 	}
 	return nil
 }
@@ -244,7 +209,7 @@ func (st *AttemptState) renew(
 // live in dedicated result columns written unconditionally by complete, not in
 // total_bytes (which is live progress gated on FileSize > 0), so a faithful
 // FileSize==0 retry stores and matches 0 and is not falsely rejected.
-func (st *AttemptState) matchesResult(result AttemptResult) bool {
+func (st *AttemptState) matchesResult(result events.AttemptResult) bool {
 	if st.StoragePath != result.StorageKey || st.StorageType != result.StorageType {
 		return false
 	}
@@ -257,7 +222,8 @@ func (st *AttemptState) matchesResult(result AttemptResult) bool {
 	if (st.Checksum == nil) != (result.Checksum == nil) {
 		return false
 	}
-	if st.Checksum != nil && *st.Checksum != *result.Checksum {
+	if st.Checksum != nil && st.Checksum.ChecksumType != result.Checksum.ChecksumType ||
+		st.Checksum.ChecksumValue != result.Checksum.ChecksumValue {
 		return false
 	}
 	return true
@@ -272,7 +238,7 @@ func (st *AttemptState) complete(
 	workerID string,
 	generation uint64,
 	now time.Time,
-	result AttemptResult,
+	result events.AttemptResult,
 ) (alreadyDone bool, err error) {
 	if st.Status == StatusCompleted {
 		if st.Generation == generation && st.matchesResult(result) {
@@ -299,8 +265,10 @@ func (st *AttemptState) complete(
 	st.ContentType = result.ContentType
 	st.FileSize = result.FileSize
 	if result.Checksum != nil {
-		checksum := *result.Checksum
-		st.Checksum = &checksum
+		st.Checksum = &ChecksumInfo{
+			ChecksumType:  result.Checksum.ChecksumType,
+			ChecksumValue: result.Checksum.ChecksumValue,
+		}
 	}
 	if result.FileSize > 0 {
 		st.Progress.TotalBytes = result.FileSize

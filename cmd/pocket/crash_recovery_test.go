@@ -38,6 +38,7 @@ import (
 	"github.com/go-llsqlite/crawshaw/sqlitex"
 	"github.com/stretchr/testify/require"
 
+	"github.com/yuisofull/goload/internal/download"
 	"github.com/yuisofull/goload/internal/events"
 	"github.com/yuisofull/goload/internal/task"
 	"github.com/yuisofull/goload/pkg/message"
@@ -82,7 +83,7 @@ type gateCall struct {
 // is dropped with errWorkerGone and nothing reaches the database: the worker
 // is dead (a crash) or cut off (a partition). It records every call.
 type attemptGate struct {
-	inner task.AttemptService
+	inner download.AttemptCoordinator
 	down  atomic.Bool
 
 	// loseNextComplete makes the next CompleteAttempt commit in the inner
@@ -122,7 +123,7 @@ func (g *attemptGate) rejected(method string) int {
 	defer g.mu.Unlock()
 	n := 0
 	for _, c := range g.calls {
-		if c.Method == method && !c.Dropped && errors.Is(c.Err, task.ErrAttemptRejected) {
+		if c.Method == method && !c.Dropped && errors.Is(c.Err, events.ErrAttemptRejected) {
 			n++
 		}
 	}
@@ -141,7 +142,7 @@ func (g *attemptGate) forwardedCalls(method string) []gateCall {
 	return out
 }
 
-func (g *attemptGate) ClaimTask(ctx context.Context, taskID uint64, workerID string) (*task.Attempt, error) {
+func (g *attemptGate) ClaimTask(ctx context.Context, taskID uint64, workerID string) (*events.Attempt, error) {
 	if g.down.Load() {
 		g.record("ClaimTask", true, errWorkerGone)
 		return nil, errWorkerGone
@@ -156,7 +157,7 @@ func (g *attemptGate) RenewLease(
 	taskID uint64,
 	workerID string,
 	generation uint64,
-	update task.LeaseUpdate,
+	update events.LeaseUpdate,
 ) (time.Time, error) {
 	if g.down.Load() {
 		g.record("RenewLease", true, errWorkerGone)
@@ -172,7 +173,7 @@ func (g *attemptGate) CompleteAttempt(
 	taskID uint64,
 	workerID string,
 	generation uint64,
-	result task.AttemptResult,
+	result events.AttemptResult,
 ) error {
 	if g.down.Load() {
 		g.record("CompleteAttempt", true, errWorkerGone)
@@ -472,12 +473,12 @@ func TestCrashRecovery_T3_StaleWorkerIsFenced(t *testing.T) {
 	// A is back on the network.
 	a.gate.down.Store(false)
 	const staleGen = 1
-	_, renewErr := a.gate.RenewLease(ctx, id, "worker-a", staleGen, task.LeaseUpdate{})
-	stale := task.AttemptResult{
+	_, renewErr := a.gate.RenewLease(ctx, id, "worker-a", staleGen, events.LeaseUpdate{})
+	stale := events.AttemptResult{
 		FileName:    "stale.bin",
 		StorageType: committed.StorageType,
 		StorageKey:  strconv.FormatUint(id, 10) + "/1/stale-0011223344556677.bin",
-		Checksum:    &task.ChecksumInfo{ChecksumType: "md5", ChecksumValue: "stale"},
+		Checksum:    &events.ChecksumInfo{ChecksumType: "md5", ChecksumValue: "stale"},
 	}
 	for name, err := range map[string]error{
 		"renew":    renewErr,
@@ -485,10 +486,10 @@ func TestCrashRecovery_T3_StaleWorkerIsFenced(t *testing.T) {
 		"fail":     a.gate.FailAttempt(ctx, id, "worker-a", staleGen, errors.New("stale failure")),
 		"release":  a.gate.ReleaseAttempt(ctx, id, "worker-a", staleGen),
 	} {
-		require.ErrorIs(t, err, task.ErrAttemptRejected, name)
+		require.ErrorIs(t, err, events.ErrAttemptRejected, name)
 	}
 	_, err := a.gate.ClaimTask(ctx, id, "worker-a")
-	require.ErrorIs(t, err, task.ErrTaskNotClaimable, "it cannot claim the completed task again")
+	require.ErrorIs(t, err, events.ErrTaskNotClaimable, "it cannot claim the completed task again")
 	require.Equal(t, committed, b.state(t, id), "B's result must be untouched")
 
 	// Now A's own download resumes and A runs its real code path against the
@@ -524,11 +525,11 @@ func TestCrashRecovery_T3b_StaleEventsChangeNothing(t *testing.T) {
 	})
 
 	a.gate.down.Store(false)
-	require.ErrorIs(t, a.gate.FailAttempt(ctx, id, "worker-a", 1, errors.New("late failure")), task.ErrAttemptRejected)
-	_, err := a.gate.RenewLease(ctx, id, "worker-a", 1, task.LeaseUpdate{
-		Progress: &task.DownloadProgress{Progress: 3, DownloadedBytes: 3, TotalBytes: 100},
+	require.ErrorIs(t, a.gate.FailAttempt(ctx, id, "worker-a", 1, errors.New("late failure")), events.ErrAttemptRejected)
+	_, err := a.gate.RenewLease(ctx, id, "worker-a", 1, events.LeaseUpdate{
+		Progress: &events.AttemptProgress{Progress: 3, DownloadedBytes: 3, TotalBytes: 100},
 	})
-	require.ErrorIs(t, err, task.ErrAttemptRejected)
+	require.ErrorIs(t, err, events.ErrAttemptRejected)
 
 	publish := func(topic string, payload any) {
 		raw, err := json.Marshal(payload)

@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/yuisofull/goload/internal/errors"
-	"github.com/yuisofull/goload/internal/task"
+	"github.com/yuisofull/goload/internal/events"
 )
 
 const (
@@ -27,8 +27,34 @@ const (
 	completeRetryDelay = time.Second
 )
 
+// AttemptCoordinator is the ownership API a download worker needs. The task
+// service's attempt service satisfies it directly; the shared types and
+// sentinel errors live in internal/events. Mutating calls fail with
+// events.ErrAttemptRejected unless the worker id and generation match and the
+// lease is unexpired; ClaimTask fails with events.ErrTaskNotClaimable for a
+// task that cannot be claimed.
+type AttemptCoordinator interface {
+	ClaimTask(ctx context.Context, taskID uint64, workerID string) (*events.Attempt, error)
+	RenewLease(
+		ctx context.Context,
+		taskID uint64,
+		workerID string,
+		generation uint64,
+		update events.LeaseUpdate,
+	) (time.Time, error)
+	CompleteAttempt(
+		ctx context.Context,
+		taskID uint64,
+		workerID string,
+		generation uint64,
+		result events.AttemptResult,
+	) error
+	FailAttempt(ctx context.Context, taskID uint64, workerID string, generation uint64, cause error) error
+	ReleaseAttempt(ctx context.Context, taskID uint64, workerID string, generation uint64) error
+}
+
 // AttemptRunner is implemented by a download service that executes dispatched
-// tasks under the task service's ownership API (see WithAttempts).
+// tasks under the task service's ownership API (see WithAttemptCoordinator).
 type AttemptRunner interface {
 	// RunAttempt executes one dispatch and returns once its delivery is
 	// settled. nil means the delivery can be acknowledged: the outcome is
@@ -57,10 +83,10 @@ var (
 	_ AdmittingRunner = (*service)(nil)
 )
 
-// WithAttempts makes the service attempt-aware: RunAttempt claims every task
+// WithAttemptCoordinator makes the service attempt-aware: RunAttempt claims every task
 // through attempts before it executes it. workerID is the stable identity of
 // this worker process; the task service stores it as the owner of each claim.
-func WithAttempts(attempts task.AttemptService, workerID string) Option {
+func WithAttemptCoordinator(attempts AttemptCoordinator, workerID string) Option {
 	return func(s *service) {
 		s.attempts = attempts
 		s.workerID = workerID
@@ -114,18 +140,18 @@ func (r *attemptRun) renew(ctx context.Context, storing bool) error {
 	if storing {
 		r.storing = true
 	}
-	progress := task.DownloadProgress{
+	progress := events.AttemptProgress{
 		Progress:        r.progress.Progress,
 		DownloadedBytes: r.progress.DownloadedBytes,
 		TotalBytes:      r.progress.TotalBytes,
 	}
-	update := task.LeaseUpdate{Progress: &progress, Storing: r.storing}
+	update := events.LeaseUpdate{Progress: &progress, Storing: r.storing}
 	r.mu.Unlock()
 
 	callCtx, cancel := context.WithTimeout(ctx, attemptCallTimeout)
 	defer cancel()
 	_, err := r.svc.attempts.RenewLease(callCtx, r.taskID, r.svc.workerID, r.generation, update)
-	if stderrors.Is(err, task.ErrAttemptRejected) {
+	if stderrors.Is(err, events.ErrAttemptRejected) {
 		r.fenced.Store(true)
 	}
 	return err
@@ -227,7 +253,7 @@ func (s *service) runAttempt(ctx context.Context, req TaskRequest, admitted bool
 	attempt, err := s.attempts.ClaimTask(claimCtx, req.TaskID, s.workerID)
 	cancelClaim()
 	if err != nil {
-		if stderrors.Is(err, task.ErrTaskNotClaimable) ||
+		if stderrors.Is(err, events.ErrTaskNotClaimable) ||
 			errors.IsError(err, errors.ErrCodeNotFound) ||
 			s.isStopped(execution) {
 			// Terminal, paused, deleted, not due yet or leased by a live
@@ -302,11 +328,11 @@ func (s *service) runTransfer(
 
 // settleSuccess commits the stored object as the task's result.
 func (s *service) settleSuccess(ctx context.Context, run *attemptRun, stored *transferResult) error {
-	result := task.AttemptResult{
+	result := events.AttemptResult{
 		FileName:    stored.FileName,
 		FileSize:    stored.FileSize,
 		ContentType: stored.ContentType,
-		Checksum:    &task.ChecksumInfo{ChecksumType: "md5", ChecksumValue: stored.MD5},
+		Checksum:    &events.ChecksumInfo{ChecksumType: "md5", ChecksumValue: stored.MD5},
 		StorageType: s.storageType,
 		StorageKey:  stored.StorageKey,
 	}
@@ -321,7 +347,7 @@ func (s *service) settleSuccess(ctx context.Context, run *attemptRun, stored *tr
 		if err == nil {
 			return nil
 		}
-		if stderrors.Is(err, task.ErrAttemptRejected) {
+		if stderrors.Is(err, events.ErrAttemptRejected) {
 			if try == 1 {
 				// Nothing of this attempt was ever committed, so no result
 				// references its object: remove it. After an unanswered try
@@ -365,7 +391,7 @@ func (s *service) settleFailure(ctx context.Context, execution *taskExecution, r
 		s.errorHandler(ctx, cause)
 		err = s.attempts.FailAttempt(callCtx, run.taskID, s.workerID, run.generation, cause)
 	}
-	if err == nil || stderrors.Is(err, task.ErrAttemptRejected) {
+	if err == nil || stderrors.Is(err, events.ErrAttemptRejected) {
 		return nil
 	}
 	return &errors.Error{Code: errors.ErrCodeInternal, Message: "failed to record attempt outcome", Cause: err}

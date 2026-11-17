@@ -193,7 +193,7 @@ func main() {
 		download.WithErrorHandler(func(_ context.Context, err error) {
 			level.Error(logger).Log("msg", "download failed", "err", err)
 		}),
-		download.WithAttempts(attemptSvc, workerID),
+		download.WithAttemptCoordinator(attemptSvc, workerID),
 	)
 	httpDL := downloader.NewHTTPDownloader(nil)
 	ftpDL := downloader.NewFTPDownloader(0)

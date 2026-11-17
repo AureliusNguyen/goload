@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	apperrors "github.com/yuisofull/goload/internal/errors"
+	"github.com/yuisofull/goload/internal/events"
 	"github.com/yuisofull/goload/internal/storage"
 )
 
@@ -43,12 +44,12 @@ func ownedState(status TaskStatus) *AttemptState {
 	}
 }
 
-func attemptResultFixture() AttemptResult {
-	return AttemptResult{
+func attemptResultFixture() events.AttemptResult {
+	return events.AttemptResult{
 		FileName:    "resolved.bin",
 		FileSize:    1000,
 		ContentType: "application/octet-stream",
-		Checksum:    &ChecksumInfo{ChecksumType: "md5", ChecksumValue: "abc123"},
+		Checksum:    &events.ChecksumInfo{ChecksumType: "md5", ChecksumValue: "abc123"},
 		StorageType: storage.TypeLocal,
 		StorageKey:  "42/1/resolved-0011223344556677.bin",
 	}
@@ -102,7 +103,7 @@ func TestAttemptState_Claim_RejectsStatesThatAreNotClaimable(t *testing.T) {
 
 			err := st.claim("worker-b", attemptNow, time.Minute)
 
-			require.ErrorIs(t, err, ErrTaskNotClaimable)
+			require.ErrorIs(t, err, events.ErrTaskNotClaimable)
 			require.True(t, apperrors.IsError(err, apperrors.ErrCodeInvalidState))
 			require.Equal(t, before, *st, "a rejected claim must not change the state")
 		})
@@ -153,28 +154,28 @@ func TestAttemptState_Claim_DownloadingWithoutLeaseIsClaimable(t *testing.T) {
 func TestAttemptState_Renew_ExtendsLeaseAndAppliesUpdate(t *testing.T) {
 	st := ownedState(StatusDownloading)
 	later := attemptNow.Add(30 * time.Second)
-	progress := DownloadProgress{Progress: 25, DownloadedBytes: 250, TotalBytes: 1000}
+	progress := events.AttemptProgress{Progress: 25, DownloadedBytes: 250, TotalBytes: 1000}
 
-	require.NoError(t, st.renew("worker-a", 1, later, time.Minute, LeaseUpdate{Progress: &progress, Storing: true}))
+	require.NoError(t, st.renew("worker-a", 1, later, time.Minute, events.LeaseUpdate{Progress: &progress, Storing: true}))
 
 	wantLease := later.Add(time.Minute)
 	require.Equal(t, &wantLease, st.LeaseExpiresAt)
 	require.Equal(t, StatusStoring, st.Status)
-	require.Equal(t, progress, st.Progress)
+	require.Equal(t, DownloadProgress(progress), st.Progress)
 	require.Equal(t, uint64(1), st.Generation, "renewing never changes the generation")
 
 	// A plain heartbeat keeps status and progress.
-	require.NoError(t, st.renew("worker-a", 1, later, time.Minute, LeaseUpdate{}))
+	require.NoError(t, st.renew("worker-a", 1, later, time.Minute, events.LeaseUpdate{}))
 	require.Equal(t, StatusStoring, st.Status)
-	require.Equal(t, progress, st.Progress)
+	require.Equal(t, DownloadProgress(progress), st.Progress)
 }
 
 // fencedOps are the attempt-originated mutations. Each must pass the same
 // ownership check before it changes anything.
 var fencedOps = map[string]func(st *AttemptState, workerID string, generation uint64, now time.Time) error{
 	"renew": func(st *AttemptState, workerID string, generation uint64, now time.Time) error {
-		progress := DownloadProgress{Progress: 99, DownloadedBytes: 990, TotalBytes: 1000}
-		return st.renew(workerID, generation, now, time.Minute, LeaseUpdate{Progress: &progress, Storing: true})
+		progress := events.AttemptProgress{Progress: 99, DownloadedBytes: 990, TotalBytes: 1000}
+		return st.renew(workerID, generation, now, time.Minute, events.LeaseUpdate{Progress: &progress, Storing: true})
 	},
 	"complete": func(st *AttemptState, workerID string, generation uint64, now time.Time) error {
 		_, err := st.complete(workerID, generation, now, attemptResultFixture())
@@ -230,7 +231,7 @@ func TestAttemptState_FencedOps_RejectStaleAttempts(t *testing.T) {
 
 				err := op(st, tc.workerID, tc.generation, tc.now)
 
-				require.ErrorIs(t, err, ErrAttemptRejected)
+				require.ErrorIs(t, err, events.ErrAttemptRejected)
 				require.True(t, apperrors.IsError(err, apperrors.ErrCodeConflict))
 				require.Equal(t, before, *st, "a rejected call must not change the state")
 			})
@@ -256,7 +257,7 @@ func TestAttemptState_Complete_AttachesResultAndClearsOwnership(t *testing.T) {
 	require.Equal(t, "resolved.bin", st.FileName)
 	require.Equal(t, storage.TypeLocal, st.StorageType)
 	require.Equal(t, result.StorageKey, st.StoragePath)
-	require.Equal(t, result.Checksum, st.Checksum)
+	require.Equal(t, &ChecksumInfo{ChecksumType: result.Checksum.ChecksumType, ChecksumValue: result.Checksum.ChecksumValue}, st.Checksum)
 	require.Equal(t, DownloadProgress{Progress: 100, DownloadedBytes: 1000, TotalBytes: 1000}, st.Progress)
 	require.Nil(t, st.ErrorMessage)
 	require.Equal(t, attemptTime(0), st.CompletedAt)
@@ -268,7 +269,7 @@ func TestAttemptState_Complete_RequiresStoring(t *testing.T) {
 
 	alreadyDone, err := st.complete("worker-a", 1, attemptNow, attemptResultFixture())
 
-	require.ErrorIs(t, err, ErrAttemptRejected)
+	require.ErrorIs(t, err, events.ErrAttemptRejected)
 	require.False(t, alreadyDone)
 	require.Equal(t, before, *st)
 }
@@ -293,7 +294,7 @@ func TestAttemptState_Complete_RetryRejectsOtherGenerationOrResult(t *testing.T)
 	otherKey := attemptResultFixture()
 	otherKey.StorageKey = "42/2/resolved-0011223344556677.bin"
 	otherChecksum := attemptResultFixture()
-	otherChecksum.Checksum = &ChecksumInfo{ChecksumType: "md5", ChecksumValue: "different"}
+	otherChecksum.Checksum = &events.ChecksumInfo{ChecksumType: "md5", ChecksumValue: "different"}
 	noChecksum := attemptResultFixture()
 	noChecksum.Checksum = nil
 	noName := attemptResultFixture()
@@ -303,7 +304,7 @@ func TestAttemptState_Complete_RetryRejectsOtherGenerationOrResult(t *testing.T)
 
 	for name, tc := range map[string]struct {
 		generation uint64
-		result     AttemptResult
+		result     events.AttemptResult
 	}{
 		"a different generation":  {generation: 2, result: attemptResultFixture()},
 		"a different storage key": {generation: 1, result: otherKey},
@@ -320,7 +321,7 @@ func TestAttemptState_Complete_RetryRejectsOtherGenerationOrResult(t *testing.T)
 
 			alreadyDone, err := st.complete("worker-a", tc.generation, attemptNow, tc.result)
 
-			require.ErrorIs(t, err, ErrAttemptRejected)
+			require.ErrorIs(t, err, events.ErrAttemptRejected)
 			require.False(t, alreadyDone)
 			require.Equal(t, before, *st)
 		})

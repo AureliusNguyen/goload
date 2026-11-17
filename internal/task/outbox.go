@@ -100,7 +100,7 @@ func NewTaskCreatedOutboxEvent(t *Task) (OutboxEvent, error) {
 // JSON already used on the task.completed topic. It is a notification only:
 // the task row is updated by the transaction that stores this event, and no
 // consumer may apply it to the task row again.
-func NewTaskCompletedOutboxEvent(taskID uint64, result AttemptResult, completedAt time.Time) (OutboxEvent, error) {
+func NewTaskCompletedOutboxEvent(taskID uint64, result events.AttemptResult, completedAt time.Time) (OutboxEvent, error) {
 	event := events.TaskCompletedEvent{
 		TaskID:      taskID,
 		FileName:    result.FileName,

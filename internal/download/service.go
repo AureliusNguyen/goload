@@ -17,7 +17,6 @@ import (
 	"github.com/yuisofull/goload/internal/errors"
 	"github.com/yuisofull/goload/internal/events"
 	"github.com/yuisofull/goload/internal/storage"
-	"github.com/yuisofull/goload/internal/task"
 )
 
 const DOWNLOAD_PROGRESS_UPDATE_INTERVAL = 3 * time.Second
@@ -74,7 +73,7 @@ type service struct {
 	progressMu         sync.Mutex
 	// attempts, workerID and renewInterval configure the attempt-aware path
 	// (RunAttempt). attempts is nil for the legacy event-driven path.
-	attempts      task.AttemptService
+	attempts      AttemptCoordinator
 	workerID      string
 	renewInterval time.Duration
 }

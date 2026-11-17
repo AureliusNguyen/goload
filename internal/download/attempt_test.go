@@ -15,10 +15,9 @@ import (
 	apperrors "github.com/yuisofull/goload/internal/errors"
 	"github.com/yuisofull/goload/internal/events"
 	"github.com/yuisofull/goload/internal/storage"
-	"github.com/yuisofull/goload/internal/task"
 )
 
-// fakeAttempts is a scripted task.AttemptService. It hands out one generation
+// fakeAttempts is a scripted AttemptCoordinator. It hands out one generation
 // and records every call in order: "claim", "renew" (a heartbeat), "storing"
 // (a heartbeat that reports the storing step), "complete", "fail", "release".
 type fakeAttempts struct {
@@ -34,11 +33,11 @@ type fakeAttempts struct {
 
 	calls     []string
 	workers   []string
-	completed []task.AttemptResult
+	completed []events.AttemptResult
 	failures  []error
 
-	gens    map[string][]uint64 // generation received per call name
-	updates []task.LeaseUpdate  // every RenewLease update, in order
+	gens    map[string][]uint64  // generation received per call name
+	updates []events.LeaseUpdate // every RenewLease update, in order
 }
 
 // recordGen notes the generation an ownership call carried. Callers hold a.mu.
@@ -57,10 +56,10 @@ func (a *fakeAttempts) generations(call string) []uint64 {
 }
 
 // leaseUpdates returns every RenewLease update received.
-func (a *fakeAttempts) leaseUpdates() []task.LeaseUpdate {
+func (a *fakeAttempts) leaseUpdates() []events.LeaseUpdate {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return append([]task.LeaseUpdate(nil), a.updates...)
+	return append([]events.LeaseUpdate(nil), a.updates...)
 }
 
 // requireGeneration fails unless the call was made at least once and every
@@ -78,7 +77,7 @@ func requireGeneration(t *testing.T, a *fakeAttempts, call string, want uint64) 
 	}
 }
 
-func (a *fakeAttempts) ClaimTask(_ context.Context, taskID uint64, workerID string) (*task.Attempt, error) {
+func (a *fakeAttempts) ClaimTask(_ context.Context, taskID uint64, workerID string) (*events.Attempt, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.calls = append(a.calls, "claim")
@@ -86,7 +85,7 @@ func (a *fakeAttempts) ClaimTask(_ context.Context, taskID uint64, workerID stri
 	if a.claimErr != nil {
 		return nil, a.claimErr
 	}
-	return &task.Attempt{TaskID: taskID, WorkerID: workerID, Generation: a.generation}, nil
+	return &events.Attempt{TaskID: taskID, WorkerID: workerID, Generation: a.generation}, nil
 }
 
 func (a *fakeAttempts) RenewLease(
@@ -94,7 +93,7 @@ func (a *fakeAttempts) RenewLease(
 	_ uint64,
 	workerID string,
 	generation uint64,
-	update task.LeaseUpdate,
+	update events.LeaseUpdate,
 ) (time.Time, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -121,7 +120,7 @@ func (a *fakeAttempts) CompleteAttempt(
 	_ uint64,
 	workerID string,
 	generation uint64,
-	result task.AttemptResult,
+	result events.AttemptResult,
 ) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -195,10 +194,10 @@ func (a *fakeAttempts) first(call string) int {
 	return -1
 }
 
-func (a *fakeAttempts) results() []task.AttemptResult {
+func (a *fakeAttempts) results() []events.AttemptResult {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return append([]task.AttemptResult(nil), a.completed...)
+	return append([]events.AttemptResult(nil), a.completed...)
 }
 
 func (a *fakeAttempts) failureCauses() []error {
@@ -218,7 +217,7 @@ func rejectedErr() error {
 	return &apperrors.Error{
 		Code:    apperrors.ErrCodeConflict,
 		Message: "attempt rejected",
-		Cause:   task.ErrAttemptRejected,
+		Cause:   events.ErrAttemptRejected,
 	}
 }
 
@@ -227,7 +226,7 @@ func notClaimableErr() error {
 	return &apperrors.Error{
 		Code:    apperrors.ErrCodeInvalidState,
 		Message: "task is not claimable",
-		Cause:   task.ErrTaskNotClaimable,
+		Cause:   events.ErrTaskNotClaimable,
 	}
 }
 
@@ -274,7 +273,7 @@ func TestRunAttempt_ClaimsStoresUnderTheGenerationKeyAndCompletes(t *testing.T) 
 		store := &keyedStorage{objects: map[string]bool{}}
 		attempts := &fakeAttempts{generation: 3}
 		bus := &busSpy{}
-		svc := NewService(store, bus, WithAttempts(attempts, "worker-1"))
+		svc := NewService(store, bus, WithAttemptCoordinator(attempts, "worker-1"))
 		svc.RegisterDownloader("HTTP", &fakeDownloader{})
 
 		if err := svc.RunAttempt(t.Context(), attemptRequest()); err != nil {
@@ -288,11 +287,11 @@ func TestRunAttempt_ClaimsStoresUnderTheGenerationKeyAndCompletes(t *testing.T) 
 		if !store.has(wantKey) {
 			t.Fatalf("object %q was not stored", wantKey)
 		}
-		want := task.AttemptResult{
+		want := events.AttemptResult{
 			FileName:    "file.txt",
 			FileSize:    7,
 			ContentType: "text/plain",
-			Checksum:    &task.ChecksumInfo{ChecksumType: "md5", ChecksumValue: "9a0364b9e99bb480dd25e1f0284c8555"},
+			Checksum:    &events.ChecksumInfo{ChecksumType: "md5", ChecksumValue: "9a0364b9e99bb480dd25e1f0284c8555"},
 			StorageType: storage.TypeLocal,
 			StorageKey:  wantKey,
 		}
@@ -357,7 +356,7 @@ func TestRunAttempt_ClaimOutcomes(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				dl := &fakeDownloader{}
 				attempts := &fakeAttempts{generation: 1, claimErr: tc.claimErr}
-				svc := NewService(&fakeStorage{}, &busSpy{}, WithAttempts(attempts, "worker-1"))
+				svc := NewService(&fakeStorage{}, &busSpy{}, WithAttemptCoordinator(attempts, "worker-1"))
 				svc.RegisterDownloader("HTTP", dl)
 
 				err := svc.RunAttempt(t.Context(), attemptRequest())
@@ -400,7 +399,7 @@ func TestRunAttempt_FailureIsRecordedWithFailAttempt(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				attempts := &fakeAttempts{generation: 4}
 				bus := &busSpy{}
-				svc := NewService(&fakeStorage{}, bus, WithAttempts(attempts, "worker-1"))
+				svc := NewService(&fakeStorage{}, bus, WithAttemptCoordinator(attempts, "worker-1"))
 				svc.RegisterDownloader("HTTP", &brokenInfoDownloader{})
 				req := attemptRequest()
 				req.SourceType = tc.sourceType
@@ -422,7 +421,7 @@ func TestRunAttempt_FailureIsRecordedWithFailAttempt(t *testing.T) {
 					t.Fatalf("calls = %v, want no complete and no release", attempts.log())
 				}
 				if got := bus.published.Load(); got != 0 {
-					t.Fatalf("a failed attempt must not publish task.failed itself, published %d", got)
+					t.Fatalf("a failed attempt must not publish failed itself, published %d", got)
 				}
 			})
 		})
@@ -434,7 +433,7 @@ func TestRunAttempt_HeartbeatRenewsTheLeaseWhileDownloading(t *testing.T) {
 		release := make(chan struct{})
 		dl := &blockingDownloader{started: make(chan struct{}, 1), release: release}
 		attempts := &fakeAttempts{generation: 5}
-		svc := NewService(&fakeStorage{}, &busSpy{}, WithAttempts(attempts, "worker-1"))
+		svc := NewService(&fakeStorage{}, &busSpy{}, WithAttemptCoordinator(attempts, "worker-1"))
 		svc.RegisterDownloader("HTTP", dl)
 		done := make(chan error, 1)
 		go func() { done <- svc.RunAttempt(t.Context(), attemptRequest()) }()
@@ -467,7 +466,7 @@ func TestRunAttempt_RejectedHeartbeatStopsWithoutForcingAResult(t *testing.T) {
 		store := &keyedStorage{objects: map[string]bool{}}
 		dl := &blockingDownloader{started: make(chan struct{}, 1), release: make(chan struct{})}
 		attempts := &fakeAttempts{generation: 1}
-		svc := NewService(store, &busSpy{}, WithAttempts(attempts, "worker-1"))
+		svc := NewService(store, &busSpy{}, WithAttemptCoordinator(attempts, "worker-1"))
 		svc.RegisterDownloader("HTTP", dl)
 		done := make(chan error, 1)
 		go func() { done <- svc.RunAttempt(t.Context(), attemptRequest()) }()
@@ -503,7 +502,7 @@ func TestRunAttempt_RejectedStoringStepRemovesOnlyItsOwnObject(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := &keyedStorage{objects: map[string]bool{}}
 		attempts := &fakeAttempts{generation: 2, storingErr: rejectedErr()}
-		svc := NewService(store, &busSpy{}, WithAttempts(attempts, "worker-1"))
+		svc := NewService(store, &busSpy{}, WithAttemptCoordinator(attempts, "worker-1"))
 		svc.RegisterDownloader("HTTP", &fakeDownloader{})
 		// The attempt that took the task over already stored its object.
 		winnerKey := attemptKey(svc, 3)
@@ -565,7 +564,7 @@ func TestRunAttempt_CompletionOutcomes(t *testing.T) {
 				store := &keyedStorage{objects: map[string]bool{}}
 				dl := &fakeDownloader{}
 				attempts := &fakeAttempts{generation: 1, completeErrs: tc.completeErrs}
-				svc := NewService(store, &busSpy{}, WithAttempts(attempts, "worker-1"))
+				svc := NewService(store, &busSpy{}, WithAttemptCoordinator(attempts, "worker-1"))
 				svc.RegisterDownloader("HTTP", dl)
 
 				err := svc.RunAttempt(t.Context(), attemptRequest())
@@ -600,7 +599,7 @@ func TestRunAttempt_PauseStopsTheAttemptWithoutReportingFailure(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		dl := &blockingDownloader{started: make(chan struct{}, 1), release: make(chan struct{})}
 		attempts := &fakeAttempts{generation: 1}
-		svc := NewService(&fakeStorage{}, &busSpy{}, WithAttempts(attempts, "worker-1"))
+		svc := NewService(&fakeStorage{}, &busSpy{}, WithAttemptCoordinator(attempts, "worker-1"))
 		svc.RegisterDownloader("HTTP", dl)
 		done := make(chan error, 1)
 		go func() { done <- svc.RunAttempt(t.Context(), attemptRequest()) }()
@@ -634,7 +633,7 @@ func TestRunAttempt_PauseInterruptsABlockedSourceRead(t *testing.T) {
 		reader := newReadBlockingReader()
 		dl := &readBlockingDownloader{reader: reader}
 		attempts := &fakeAttempts{generation: 1}
-		svc := NewService(&fakeStorage{}, &busSpy{}, WithAttempts(attempts, "worker-1"))
+		svc := NewService(&fakeStorage{}, &busSpy{}, WithAttemptCoordinator(attempts, "worker-1"))
 		svc.RegisterDownloader("HTTP", dl)
 		req := attemptRequest()
 		done := make(chan error, 1)
@@ -678,7 +677,7 @@ func TestRunAttempt_StopReturnsEvenIfReaderCloseHangs(t *testing.T) {
 		reader := newHangingCloseReader()
 		dl := &hangingCloseDownloader{reader: reader}
 		attempts := &fakeAttempts{generation: 1}
-		svc := NewService(&fakeStorage{}, &busSpy{}, WithAttempts(attempts, "worker-1"))
+		svc := NewService(&fakeStorage{}, &busSpy{}, WithAttemptCoordinator(attempts, "worker-1"))
 		svc.RegisterDownloader("HTTP", dl)
 		req := attemptRequest()
 		done := make(chan error, 1)
@@ -723,7 +722,7 @@ func TestRunAttempt_WorkerShutdownReleasesInsteadOfFailing(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		dl := &blockingDownloader{started: make(chan struct{}, 1), release: make(chan struct{})}
 		attempts := &fakeAttempts{generation: 6}
-		svc := NewService(&fakeStorage{}, &busSpy{}, WithAttempts(attempts, "worker-1"))
+		svc := NewService(&fakeStorage{}, &busSpy{}, WithAttemptCoordinator(attempts, "worker-1"))
 		svc.RegisterDownloader("HTTP", dl)
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
@@ -751,7 +750,7 @@ func TestRunAttempt_QueuedTaskIsNotClaimedAndDuplicatesAreDropped(t *testing.T) 
 		release := make(chan struct{})
 		dl := &blockingDownloader{started: make(chan struct{}, 2), release: release}
 		attempts := &fakeAttempts{generation: 1}
-		svc := NewService(&fakeStorage{}, &busSpy{}, WithAttempts(attempts, "worker-1"), WithMaxConcurrent(1))
+		svc := NewService(&fakeStorage{}, &busSpy{}, WithAttemptCoordinator(attempts, "worker-1"), WithMaxConcurrent(1))
 		svc.RegisterDownloader("HTTP", dl)
 
 		running := attemptRequest()
@@ -804,7 +803,7 @@ func (s *sizedStorage) Store(_ context.Context, _ string, reader io.Reader, meta
 func TestRunAttempt_StoringStepIsReportedEvenWhenTheBackendNeverReadsEOF(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		attempts := &fakeAttempts{generation: 1}
-		svc := NewService(&sizedStorage{}, &busSpy{}, WithAttempts(attempts, "worker-1"))
+		svc := NewService(&sizedStorage{}, &busSpy{}, WithAttemptCoordinator(attempts, "worker-1"))
 		svc.RegisterDownloader("HTTP", &fakeDownloader{})
 
 		if err := svc.RunAttempt(t.Context(), attemptRequest()); err != nil {
@@ -832,7 +831,7 @@ func TestRunAttempt_WithoutAttemptAPIIsAnError(t *testing.T) {
 func TestRunAttempt_RejectedFailAttemptIsNotAnError(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		attempts := &fakeAttempts{generation: 4, failErr: rejectedErr()}
-		svc := NewService(&fakeStorage{}, &busSpy{}, WithAttempts(attempts, "worker-1"))
+		svc := NewService(&fakeStorage{}, &busSpy{}, WithAttemptCoordinator(attempts, "worker-1"))
 		svc.RegisterDownloader("HTTP", &brokenInfoDownloader{})
 
 		if err := svc.RunAttempt(t.Context(), attemptRequest()); err != nil {
@@ -856,7 +855,7 @@ func TestRunAttempt_RejectedReleaseIsNotAnError(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		dl := &blockingDownloader{started: make(chan struct{}, 1), release: make(chan struct{})}
 		attempts := &fakeAttempts{generation: 6, releaseErr: rejectedErr()}
-		svc := NewService(&fakeStorage{}, &busSpy{}, WithAttempts(attempts, "worker-1"))
+		svc := NewService(&fakeStorage{}, &busSpy{}, WithAttemptCoordinator(attempts, "worker-1"))
 		svc.RegisterDownloader("HTTP", dl)
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
@@ -885,7 +884,7 @@ func TestRunAttempt_RejectedReleaseIsNotAnError(t *testing.T) {
 func TestRunAdmittedAttempt_ReleasesTheSlotTheCallerAdmitted(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		attempts := &fakeAttempts{generation: 1}
-		svc := NewService(&fakeStorage{}, &busSpy{}, WithAttempts(attempts, "worker-1"), WithMaxConcurrent(1))
+		svc := NewService(&fakeStorage{}, &busSpy{}, WithAttemptCoordinator(attempts, "worker-1"), WithMaxConcurrent(1))
 		svc.RegisterDownloader("HTTP", &blockingDownloader{started: make(chan struct{}, 1), release: closedChan()})
 
 		if err := svc.Admit(t.Context()); err != nil {

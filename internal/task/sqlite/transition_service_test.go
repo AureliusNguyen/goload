@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	apperrors "github.com/yuisofull/goload/internal/errors"
+	"github.com/yuisofull/goload/internal/events"
 	task "github.com/yuisofull/goload/internal/task"
 	"github.com/yuisofull/goload/pkg/message/inmem"
 )
@@ -34,19 +35,19 @@ func newTransitionFixture(t *testing.T) *transitionFixture {
 
 // requireFencedOut asserts that every attempt-originated call of attempt is
 // rejected.
-func (f *transitionFixture) requireFencedOut(t *testing.T, taskID uint64, attempt *task.Attempt) {
+func (f *transitionFixture) requireFencedOut(t *testing.T, taskID uint64, attempt *events.Attempt) {
 	t.Helper()
 
 	ctx := context.Background()
 	worker, generation := attempt.WorkerID, attempt.Generation
-	_, renewErr := f.svc.RenewLease(ctx, taskID, worker, generation, task.LeaseUpdate{})
+	_, renewErr := f.svc.RenewLease(ctx, taskID, worker, generation, events.LeaseUpdate{})
 	for name, err := range map[string]error{
 		"renew":    renewErr,
 		"complete": f.svc.CompleteAttempt(ctx, taskID, worker, generation, attemptResult(taskID, generation)),
 		"fail":     f.svc.FailAttempt(ctx, taskID, worker, generation, errors.New("late failure")),
 		"release":  f.svc.ReleaseAttempt(ctx, taskID, worker, generation),
 	} {
-		require.ErrorIs(t, err, task.ErrAttemptRejected, name)
+		require.ErrorIs(t, err, events.ErrAttemptRejected, name)
 	}
 }
 
@@ -64,7 +65,7 @@ func TestCancelTask_ActiveAttemptIsFencedOut(t *testing.T) {
 	require.Nil(t, st.LeaseExpiresAt)
 	f.requireFencedOut(t, id, attempt)
 	_, err := f.svc.ClaimTask(ctx, id, "worker-b")
-	require.ErrorIs(t, err, task.ErrTaskNotClaimable)
+	require.ErrorIs(t, err, events.ErrTaskNotClaimable)
 	require.Equal(t, task.StatusCancelled, f.state(t, id).Status)
 	require.Empty(t, f.unsent(t))
 }
@@ -85,7 +86,7 @@ func TestCancelTask_QueuedRetryStaysCancelled(t *testing.T) {
 	require.Nil(t, st.NextAttemptAt)
 	f.clock.Advance(task.DefaultRetryBackoff(1))
 	_, err = f.svc.ClaimTask(ctx, id, "worker-b")
-	require.ErrorIs(t, err, task.ErrTaskNotClaimable)
+	require.ErrorIs(t, err, events.ErrTaskNotClaimable)
 }
 
 func TestCancelTask_RejectsCompletedTask(t *testing.T) {
@@ -119,7 +120,7 @@ func TestPauseTask_RetiresAttempt(t *testing.T) {
 	f.requireFencedOut(t, id, attempt)
 	// A paused task is held by the user: nobody may claim it.
 	_, err = f.svc.ClaimTask(ctx, id, "worker-b")
-	require.ErrorIs(t, err, task.ErrTaskNotClaimable)
+	require.ErrorIs(t, err, events.ErrTaskNotClaimable)
 }
 
 func TestPauseTask_OnlyDownloadingTasks(t *testing.T) {
@@ -145,8 +146,8 @@ func TestResumeTask_RequeuesAsNewAttemptFromZero(t *testing.T) {
 	ctx := context.Background()
 	first, err := f.svc.ClaimTask(ctx, id, "worker-a")
 	require.NoError(t, err)
-	progress := task.DownloadProgress{Progress: 40, DownloadedBytes: 400, TotalBytes: 1000}
-	_, err = f.svc.RenewLease(ctx, id, "worker-a", first.Generation, task.LeaseUpdate{Progress: &progress})
+	progress := events.AttemptProgress{Progress: 40, DownloadedBytes: 400, TotalBytes: 1000}
+	_, err = f.svc.RenewLease(ctx, id, "worker-a", first.Generation, events.LeaseUpdate{Progress: &progress})
 	require.NoError(t, err)
 	require.NoError(t, f.tasks.PauseTask(ctx, id))
 

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/yuisofull/goload/internal/errors"
+	"github.com/yuisofull/goload/internal/events"
 )
 
 // AttemptService is the ownership API download workers use. Workers never
@@ -17,42 +18,7 @@ import (
 // with ErrAttemptRejected unless worker id and generation match the row and
 // the lease is unexpired. An attempt whose lease expired must ClaimTask again
 // and gets a new generation; it can never revive its old lease.
-type AttemptService interface {
-	// ClaimTask claims a claimable task: PENDING, unowned and due, or
-	// DOWNLOADING/STORING with an expired lease. Anything else is rejected
-	// with ErrTaskNotClaimable.
-	ClaimTask(ctx context.Context, taskID uint64, workerID string) (*Attempt, error)
-	// RenewLease is the heartbeat. It extends the lease and may carry a
-	// progress report and the DOWNLOADING -> STORING step. It returns the new
-	// lease expiry.
-	RenewLease(
-		ctx context.Context,
-		taskID uint64,
-		workerID string,
-		generation uint64,
-		update LeaseUpdate,
-	) (time.Time, error)
-	// CompleteAttempt commits the attempt's result: status COMPLETED, file
-	// name, checksum and the winning storage key in one transaction, together
-	// with the lifecycle completion event in the outbox. Repeating the call
-	// for the winning generation with the same result returns nil without
-	// writing anything.
-	CompleteAttempt(
-		ctx context.Context,
-		taskID uint64,
-		workerID string,
-		generation uint64,
-		result AttemptResult,
-	) error
-	// FailAttempt records a failed attempt: back to PENDING with a retry time
-	// while the retry budget lasts, terminal FAILED once it is exhausted.
-	FailAttempt(ctx context.Context, taskID uint64, workerID string, generation uint64, cause error) error
-	// ReleaseAttempt hands the task back without counting a failure. The task
-	// is claimable again immediately.
-	ReleaseAttempt(ctx context.Context, taskID uint64, workerID string, generation uint64) error
-}
-
-type attemptService struct {
+type AttemptService struct {
 	attempts AttemptRepository
 	tx       TxManager
 	outbox   OutboxRepository
@@ -62,12 +28,12 @@ type attemptService struct {
 }
 
 // AttemptServiceOption configures an AttemptService.
-type AttemptServiceOption func(*attemptService)
+type AttemptServiceOption func(*AttemptService)
 
 // WithAttemptClock overrides the clock that decides lease expiry and retry
 // due times. A nil clock is ignored.
 func WithAttemptClock(now func() time.Time) AttemptServiceOption {
-	return func(s *attemptService) {
+	return func(s *AttemptService) {
 		if now != nil {
 			s.now = now
 		}
@@ -77,7 +43,7 @@ func WithAttemptClock(now func() time.Time) AttemptServiceOption {
 // WithLeaseDuration overrides DefaultLeaseDuration. Values that are zero or
 // negative are ignored.
 func WithLeaseDuration(d time.Duration) AttemptServiceOption {
-	return func(s *attemptService) {
+	return func(s *AttemptService) {
 		if d > 0 {
 			s.lease = d
 		}
@@ -86,7 +52,7 @@ func WithLeaseDuration(d time.Duration) AttemptServiceOption {
 
 // WithRetryBackoff overrides DefaultRetryBackoff. A nil function is ignored.
 func WithRetryBackoff(backoff func(retryCount int) time.Duration) AttemptServiceOption {
-	return func(s *attemptService) {
+	return func(s *AttemptService) {
 		if backoff != nil {
 			s.backoff = backoff
 		}
@@ -100,8 +66,8 @@ func NewAttemptService(
 	tx TxManager,
 	outbox OutboxRepository,
 	opts ...AttemptServiceOption,
-) AttemptService {
-	s := &attemptService{
+) *AttemptService {
+	s := &AttemptService{
 		attempts: attempts,
 		tx:       tx,
 		outbox:   outbox,
@@ -143,7 +109,7 @@ func saveAttemptState(ctx context.Context, attempts AttemptRepository, st *Attem
 // transition runs one state transition in one transaction: lock the row,
 // apply fn, and save when fn asks for it. An error from fn rolls back, so a
 // rejected call writes nothing.
-func (s *attemptService) transition(
+func (s *AttemptService) transition(
 	ctx context.Context,
 	taskID uint64,
 	fn func(ctx context.Context, st *AttemptState) (save bool, err error),
@@ -161,17 +127,17 @@ func (s *attemptService) transition(
 	})
 }
 
-func (s *attemptService) ClaimTask(ctx context.Context, taskID uint64, workerID string) (*Attempt, error) {
+func (s *AttemptService) ClaimTask(ctx context.Context, taskID uint64, workerID string) (*events.Attempt, error) {
 	if workerID == "" {
 		return nil, errWorkerIDRequired()
 	}
 
-	var attempt *Attempt
+	var attempt *events.Attempt
 	err := s.transition(ctx, taskID, func(_ context.Context, st *AttemptState) (bool, error) {
 		if err := st.claim(workerID, s.now(), s.lease); err != nil {
 			return false, err
 		}
-		attempt = &Attempt{
+		attempt = &events.Attempt{
 			TaskID:         taskID,
 			WorkerID:       workerID,
 			Generation:     st.Generation,
@@ -185,12 +151,12 @@ func (s *attemptService) ClaimTask(ctx context.Context, taskID uint64, workerID 
 	return attempt, nil
 }
 
-func (s *attemptService) RenewLease(
+func (s *AttemptService) RenewLease(
 	ctx context.Context,
 	taskID uint64,
 	workerID string,
 	generation uint64,
-	update LeaseUpdate,
+	update events.LeaseUpdate,
 ) (time.Time, error) {
 	if workerID == "" {
 		return time.Time{}, errWorkerIDRequired()
@@ -210,12 +176,12 @@ func (s *attemptService) RenewLease(
 	return lease, nil
 }
 
-func (s *attemptService) CompleteAttempt(
+func (s *AttemptService) CompleteAttempt(
 	ctx context.Context,
 	taskID uint64,
 	workerID string,
 	generation uint64,
-	result AttemptResult,
+	result events.AttemptResult,
 ) error {
 	if workerID == "" {
 		return errWorkerIDRequired()
@@ -270,7 +236,7 @@ func failureMessage(cause error) string {
 	return "unknown error"
 }
 
-func (s *attemptService) FailAttempt(
+func (s *AttemptService) FailAttempt(
 	ctx context.Context,
 	taskID uint64,
 	workerID string,
@@ -290,7 +256,7 @@ func (s *attemptService) FailAttempt(
 	})
 }
 
-func (s *attemptService) ReleaseAttempt(
+func (s *AttemptService) ReleaseAttempt(
 	ctx context.Context,
 	taskID uint64,
 	workerID string,

@@ -149,7 +149,7 @@ func main() {
 		download.WithErrorHandler(func(ctx context.Context, err error) {
 			level.Error(logger).Log("msg", "download failed", "err", err)
 		}),
-		download.WithAttempts(attemptSvc, workerID),
+		download.WithAttemptCoordinator(attemptSvc, workerID),
 	)
 	// register downloaders
 	httpDL := downloader.NewHTTPDownloader(nil)
