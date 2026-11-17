@@ -42,6 +42,15 @@ export function ChatWorkspace() {
     />
   );
 
+  const empty = activeConversation.messages.length === 0;
+  const composer = (
+    <Composer
+      layout={empty ? "centered" : "docked"}
+      busy={streamingIds.has(activeId)}
+      onSend={(text) => sendMessage(activeId, text)}
+    />
+  );
+
   return (
     <ChatTheme ref={rootRef} className="chat-root flex flex-col">
       <header className="chat-header">
@@ -84,8 +93,9 @@ export function ChatWorkspace() {
             onSuggestion={(text) => {
               sendMessage(activeId, text);
             }}
+            emptySlot={empty ? composer : undefined}
           />
-          <Composer busy={streamingIds.has(activeId)} onSend={(text) => sendMessage(activeId, text)} />
+          {empty ? null : composer}
         </main>
       </div>
 

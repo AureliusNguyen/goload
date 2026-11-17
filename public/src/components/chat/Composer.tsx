@@ -10,6 +10,8 @@ export interface ComposerProps {
   busy: boolean;
   /** Receives the raw draft. Returns false when the store refused it. */
   onSend: (text: string) => boolean;
+  /** "centered" sits in the empty state under the heading; "docked" is below the thread. */
+  layout?: "centered" | "docked";
 }
 
 export const STATUS_BUSY = "GoLoad is replying. Sending is paused until this reply finishes.";
@@ -25,7 +27,7 @@ export const STATUS_IDLE = "Enter to send. Shift+Enter for a new line.";
  * "Not uploaded". File contents are never read and nothing is sent with the
  * message.
  */
-export function Composer({ busy, onSend }: ComposerProps) {
+export function Composer({ busy, onSend, layout = "docked" }: ComposerProps) {
   const [value, setValue] = useState("");
   const [attachments, setAttachments] = useState<AttachmentStub[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -76,6 +78,7 @@ export function Composer({ busy, onSend }: ComposerProps) {
       aria-label="Message composer"
       aria-busy={busy ? true : undefined}
       data-busy={busy ? "true" : undefined}
+      data-layout={layout}
       className="chat-composer"
       onSubmit={(event) => {
         event.preventDefault();

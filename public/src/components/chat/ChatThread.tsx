@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { ArrowDown } from "lucide-react";
 import { ChatButton } from "@/components/chat/ChatButton";
@@ -16,6 +17,8 @@ export interface ChatThreadProps {
   conversationId: string;
   messages: ChatMessage[];
   onSuggestion: (text: string) => void;
+  /** Rendered between the heading and the chips when there are no messages. */
+  emptySlot?: ReactNode;
 }
 
 /**
@@ -23,7 +26,7 @@ export interface ChatThreadProps {
  * while the reader is already near it; a reader who scrolled up is left alone
  * and gets a "Jump to latest" button instead.
  */
-export function ChatThread({ conversationId, messages, onSuggestion }: ChatThreadProps) {
+export function ChatThread({ conversationId, messages, onSuggestion, emptySlot }: ChatThreadProps) {
   const paneRef = useRef<HTMLDivElement>(null);
   // The ref is the truth for effects; the state only drives the jump button.
   const pinnedRef = useRef(true);
@@ -82,13 +85,13 @@ export function ChatThread({ conversationId, messages, onSuggestion }: ChatThrea
         className="chat-scroll min-h-0 flex-1 px-4 py-6 md:px-8"
       >
         {messages.length === 0 ? (
-          <div className="chat-empty mx-auto flex min-h-full w-full max-w-2xl flex-col justify-center gap-6">
-            <p className="chat-kicker chat-mono">PREVIEW / SIMULATED REPLIES</p>
-            <h2 className="chat-empty-title chat-display">Name it. I will fetch it.</h2>
+          <div role="group" aria-label="Start a conversation" className="chat-empty chat-column flex min-h-full flex-col justify-center gap-6">
+            <h2 className="chat-empty-title">What should I fetch?</h2>
             <p className="chat-empty-lede">
-              Not yet, though: replies here are canned. Nothing is searched, downloaded or uploaded in this preview.
+              Replies here are simulated. Nothing is searched, downloaded or uploaded in this preview.
             </p>
-            <ul className="m-0 flex list-none flex-col gap-3 p-0 sm:flex-row sm:flex-wrap">
+            {emptySlot}
+            <ul className="chat-chips-row">
               {SUGGESTIONS.map((suggestion) => (
                 <li key={suggestion}>
                   <ChatButton className="chat-suggestion" onClick={() => onSuggestion(suggestion)}>

@@ -380,26 +380,36 @@
   scrollbar-width: thin;
   scrollbar-color: var(--chat-line) transparent;
 }
-.chat-theme .chat-kicker {
-  margin: 0;
-  font-size: 0.75rem;
-  letter-spacing: 0.08em;
-  color: hsl(var(--muted-foreground));
-}
 .chat-theme .chat-empty-title {
   margin: 0;
-  font-size: clamp(2rem, 6vw, 3.5rem);
+  font-size: clamp(1.75rem, 5vw, 2.5rem);
+  font-weight: 600;
+  letter-spacing: -0.02em;
   text-wrap: balance;
 }
 .chat-theme .chat-empty-lede {
-  margin: 0;
+  margin: -12px 0 0;
   max-width: 34rem;
-  color: hsl(var(--muted-foreground));
+  color: var(--chat-muted);
+}
+.chat-theme .chat-chips-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 .chat-theme .chat-suggestion {
   justify-content: flex-start;
   text-align: left;
   white-space: normal;
+  font-size: 0.875rem;
+  font-weight: 400;
+  color: var(--chat-muted);
+}
+.chat-theme .chat-suggestion:hover {
+  color: var(--chat-ash);
 }
 .chat-theme .chat-panel {
   width: 100%;
@@ -473,28 +483,34 @@
   gap: 8px;
 }
 
-/* 10. Composer */
+/* 10. Composer: the hero. Docked it spans the 720px column; centered it sits
+      in the empty state under the heading. */
 .chat-theme .chat-composer {
   display: flex;
   flex: none;
   flex-direction: column;
   gap: 8px;
   width: 100%;
-  max-width: 48rem;
+  max-width: 720px;
   margin: 0 auto;
+}
+.chat-theme .chat-composer[data-layout="docked"] {
   padding: 8px 16px max(12px, env(safe-area-inset-bottom));
 }
 .chat-theme .chat-composer-box {
   display: flex;
   align-items: flex-end;
   gap: 8px;
-  padding: 10px 14px 12px 12px;
+  padding: 12px 12px 12px 16px;
+}
+.chat-theme .chat-composer-box:focus-within [data-chat-decor="panel"] {
+  --decor-edge: var(--chat-ember);
 }
 /* 16px text: anything smaller makes iOS zoom the page when the field is focused. */
 .chat-theme .chat-textarea {
-  min-height: 56px;
-  max-height: 160px;
-  padding: 8px;
+  min-height: 64px;
+  max-height: 200px;
+  padding: 8px 0;
   resize: none;
   border: 0;
   background: transparent;
@@ -502,6 +518,9 @@
   font-size: 1rem;
   line-height: 1.5;
   field-sizing: content;
+}
+.chat-theme .chat-textarea::placeholder {
+  color: var(--chat-muted);
 }
 .chat-theme .chat-composer-actions {
   display: flex;
@@ -515,7 +534,7 @@
   gap: 8px;
   max-height: 108px;
   margin: 0;
-  padding: 4px 8px;
+  padding: 0;
   overflow-y: auto;
   list-style: none;
 }
@@ -539,13 +558,13 @@
   font-size: 0.6875rem;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: hsl(var(--muted-foreground));
+  color: var(--chat-muted);
 }
 .chat-theme .chat-composer-status {
   min-height: 1.25rem;
   margin: 0;
   font-size: 0.75rem;
-  color: hsl(var(--muted-foreground));
+  color: var(--chat-muted);
 }
 .chat-theme .chat-composer[data-busy="true"] .chat-composer-status {
   color: var(--chat-ash);
