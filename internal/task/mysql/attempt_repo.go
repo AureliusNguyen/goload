@@ -9,58 +9,63 @@ import (
 	"github.com/yuisofull/goload/internal/errors"
 	"github.com/yuisofull/goload/internal/storage"
 	task "github.com/yuisofull/goload/internal/task"
+	"github.com/yuisofull/goload/internal/task/mysql/sqlc"
 )
 
 // errAttemptNeedsTx is returned when the lock or the save is attempted
 // without the transaction DoInTx stores in ctx.
 var errAttemptNeedsTx = stderrors.New("mysql: attempt state must be locked and saved inside TxManager.DoInTx")
 
-const selectAttemptStateSQL = `SELECT status, owner_id, lease_expires_at, attempt_generation, retry_count, next_attempt_at,
-       max_retries, file_name, storage_type, storage_path, checksum_type, checksum_value,
-       progress, downloaded_bytes, total_bytes, error_message, completed_at
-FROM tasks
-WHERE id = ?`
-
-// lockAttemptStateSQL keeps the row locked until the transaction ends, so
-// concurrent transitions of one task run one after another.
-const lockAttemptStateSQL = selectAttemptStateSQL + `
-FOR UPDATE`
-
-const saveAttemptStateSQL = `UPDATE tasks
-SET status = ?, owner_id = ?, lease_expires_at = ?, attempt_generation = ?, retry_count = ?, next_attempt_at = ?,
-    file_name = ?, storage_type = ?, storage_path = ?, checksum_type = ?, checksum_value = ?,
-    progress = ?, downloaded_bytes = ?, total_bytes = ?, error_message = ?, completed_at = ?
-WHERE id = ?`
-
 type attemptRepo struct {
-	db *sql.DB
+	db      *sql.DB
+	queries *sqlc.Queries
 }
 
 // NewAttemptRepo returns the MySQL implementation of task.AttemptRepository.
-// It uses plain database/sql (no sqlc) and needs parseTime=true in the DSN,
+// It uses the sqlc-generated queries and needs parseTime=true in the DSN,
 // which cmd/task already sets.
 func NewAttemptRepo(db *sql.DB) task.AttemptRepository {
-	return &attemptRepo{db: db}
+	return &attemptRepo{db: db, queries: sqlc.New(db)}
+}
+
+// q binds the sqlc queries to the transaction DoInTx stored in ctx, or to the
+// plain *sql.DB when there is none.
+func (r *attemptRepo) q(ctx context.Context) *sqlc.Queries {
+	if tx, ok := ctx.Value(txKey{}).(*sql.Tx); ok {
+		return r.queries.WithTx(tx)
+	}
+	return r.queries
+}
+
+func hasTx(ctx context.Context) bool {
+	_, ok := ctx.Value(txKey{}).(*sql.Tx)
+	return ok
 }
 
 func (r *attemptRepo) GetAttemptState(ctx context.Context, taskID uint64) (*task.AttemptState, error) {
-	if tx, ok := ctx.Value(txKey{}).(*sql.Tx); ok {
-		return scanAttemptState(tx.QueryRowContext(ctx, selectAttemptStateSQL, taskID), taskID)
+	row, err := r.q(ctx).GetAttemptState(ctx, taskID)
+	if err != nil {
+		return nil, mapAttemptErr(err)
 	}
-	return scanAttemptState(r.db.QueryRowContext(ctx, selectAttemptStateSQL, taskID), taskID)
+	return attemptStateFromRow(taskID, row), nil
 }
 
+// LockAttemptState keeps the row locked until the transaction ends, so
+// concurrent transitions of one task run one after another.
 func (r *attemptRepo) LockAttemptState(ctx context.Context, taskID uint64) (*task.AttemptState, error) {
-	tx, ok := ctx.Value(txKey{}).(*sql.Tx)
-	if !ok {
+	if !hasTx(ctx) {
 		return nil, errAttemptNeedsTx
 	}
-	return scanAttemptState(tx.QueryRowContext(ctx, lockAttemptStateSQL, taskID), taskID)
+	row, err := r.q(ctx).LockAttemptState(ctx, taskID)
+	if err != nil {
+		return nil, mapAttemptErr(err)
+	}
+	// The lock row and the get row have identical fields.
+	return attemptStateFromRow(taskID, sqlc.GetAttemptStateRow(row)), nil
 }
 
 func (r *attemptRepo) SaveAttemptState(ctx context.Context, state *task.AttemptState) error {
-	tx, ok := ctx.Value(txKey{}).(*sql.Tx)
-	if !ok {
+	if !hasTx(ctx) {
 		return errAttemptNeedsTx
 	}
 
@@ -73,25 +78,31 @@ func (r *attemptRepo) SaveAttemptState(ctx context.Context, state *task.AttemptS
 		errorMessage = sql.NullString{String: *state.ErrorMessage, Valid: true}
 	}
 
-	_, err := tx.ExecContext(ctx, saveAttemptStateSQL,
-		string(state.Status),
-		sql.NullString{String: state.OwnerID, Valid: state.OwnerID != ""},
-		nullTime(state.LeaseExpiresAt, time.Microsecond),
-		state.Generation,
-		state.RetryCount,
-		nullTime(state.NextAttemptAt, time.Microsecond),
-		state.FileName,
-		string(state.StorageType),
-		state.StoragePath,
-		checksumType,
-		checksumValue,
-		state.Progress.Progress,
-		state.Progress.DownloadedBytes,
-		state.Progress.TotalBytes,
-		errorMessage,
-		nullTime(state.CompletedAt, time.Second),
-		state.TaskID,
-	)
+	return r.q(ctx).SaveAttemptState(ctx, sqlc.SaveAttemptStateParams{
+		Status:            string(state.Status),
+		OwnerID:           sql.NullString{String: state.OwnerID, Valid: state.OwnerID != ""},
+		LeaseExpiresAt:    nullTime(state.LeaseExpiresAt, time.Microsecond),
+		AttemptGeneration: state.Generation,
+		RetryCount:        uint32(state.RetryCount),
+		NextAttemptAt:     nullTime(state.NextAttemptAt, time.Microsecond),
+		FileName:          state.FileName,
+		StorageType:       string(state.StorageType),
+		StoragePath:       state.StoragePath,
+		ChecksumType:      checksumType,
+		ChecksumValue:     checksumValue,
+		Progress:          sql.NullFloat64{Float64: state.Progress.Progress, Valid: true},
+		DownloadedBytes:   sql.NullInt64{Int64: state.Progress.DownloadedBytes, Valid: true},
+		TotalBytes:        sql.NullInt64{Int64: state.Progress.TotalBytes, Valid: true},
+		ErrorMessage:      errorMessage,
+		CompletedAt:       nullTime(state.CompletedAt, time.Second),
+		ID:                state.TaskID,
+	})
+}
+
+func mapAttemptErr(err error) error {
+	if stderrors.Is(err, sql.ErrNoRows) {
+		return errors.ErrNotFound
+	}
 	return err
 }
 
@@ -105,74 +116,43 @@ func nullTime(t *time.Time, precision time.Duration) sql.NullTime {
 	return sql.NullTime{Time: t.UTC().Truncate(precision), Valid: true}
 }
 
-// scanAttemptState maps one selectAttemptStateSQL row.
-func scanAttemptState(row *sql.Row, taskID uint64) (*task.AttemptState, error) {
-	var (
-		status        string
-		ownerID       sql.NullString
-		leaseExpires  sql.NullTime
-		generation    uint64
-		retryCount    int
-		nextAttemptAt sql.NullTime
-		maxRetries    int
-		fileName      string
-		storageType   string
-		storagePath   string
-		checksumType  sql.NullString
-		checksumValue sql.NullString
-		progress      sql.NullFloat64
-		downloaded    sql.NullInt64
-		total         sql.NullInt64
-		errorMessage  sql.NullString
-		completedAt   sql.NullTime
-	)
-	err := row.Scan(
-		&status, &ownerID, &leaseExpires, &generation, &retryCount, &nextAttemptAt,
-		&maxRetries, &fileName, &storageType, &storagePath, &checksumType, &checksumValue,
-		&progress, &downloaded, &total, &errorMessage, &completedAt,
-	)
-	if err != nil {
-		if stderrors.Is(err, sql.ErrNoRows) {
-			return nil, errors.ErrNotFound
-		}
-		return nil, err
-	}
-
+// attemptStateFromRow maps one GetAttemptState row.
+func attemptStateFromRow(taskID uint64, row sqlc.GetAttemptStateRow) *task.AttemptState {
 	state := &task.AttemptState{
 		TaskID:     taskID,
-		Status:     task.TaskStatus(status),
-		OwnerID:    ownerID.String, // NULL reads as ""
-		Generation: generation,
-		RetryCount: retryCount,
-		MaxRetries: maxRetries,
-		FileName:   fileName,
+		Status:     task.TaskStatus(row.Status),
+		OwnerID:    row.OwnerID.String, // NULL reads as ""
+		Generation: row.AttemptGeneration,
+		RetryCount: int(row.RetryCount),
+		MaxRetries: int(row.MaxRetries),
+		FileName:   row.FileName,
 		// Kept exactly as stored (no normalization), so a save writes the
 		// same value back.
-		StorageType: storage.Type(storageType),
-		StoragePath: storagePath,
+		StorageType: storage.Type(row.StorageType),
+		StoragePath: row.StoragePath,
 		Progress: task.DownloadProgress{
-			Progress:        progress.Float64,
-			DownloadedBytes: downloaded.Int64,
-			TotalBytes:      total.Int64,
+			Progress:        row.Progress.Float64,
+			DownloadedBytes: row.DownloadedBytes.Int64,
+			TotalBytes:      row.TotalBytes.Int64,
 		},
 	}
-	if leaseExpires.Valid {
-		state.LeaseExpiresAt = &leaseExpires.Time
+	if row.LeaseExpiresAt.Valid {
+		state.LeaseExpiresAt = &row.LeaseExpiresAt.Time
 	}
-	if nextAttemptAt.Valid {
-		state.NextAttemptAt = &nextAttemptAt.Time
+	if row.NextAttemptAt.Valid {
+		state.NextAttemptAt = &row.NextAttemptAt.Time
 	}
-	if checksumType.Valid || checksumValue.Valid {
+	if row.ChecksumType.Valid || row.ChecksumValue.Valid {
 		state.Checksum = &task.ChecksumInfo{
-			ChecksumType:  checksumType.String,
-			ChecksumValue: checksumValue.String,
+			ChecksumType:  row.ChecksumType.String,
+			ChecksumValue: row.ChecksumValue.String,
 		}
 	}
-	if errorMessage.Valid {
-		state.ErrorMessage = &errorMessage.String
+	if row.ErrorMessage.Valid {
+		state.ErrorMessage = &row.ErrorMessage.String
 	}
-	if completedAt.Valid {
-		state.CompletedAt = &completedAt.Time
+	if row.CompletedAt.Valid {
+		state.CompletedAt = &row.CompletedAt.Time
 	}
-	return state, nil
+	return state
 }
