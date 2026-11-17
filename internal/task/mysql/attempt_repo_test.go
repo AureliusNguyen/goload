@@ -50,6 +50,7 @@ var attemptStateColumnNames = []string{
 	"status", "owner_id", "lease_expires_at", "attempt_generation", "retry_count", "next_attempt_at",
 	"max_retries", "file_name", "storage_type", "storage_path", "checksum_type", "checksum_value",
 	"progress", "downloaded_bytes", "total_bytes", "error_message", "completed_at",
+	"result_content_type", "result_file_size",
 }
 
 // attemptLease is already truncated to microseconds, as DATETIME(6) stores it.
@@ -70,6 +71,7 @@ func ownedAttemptRow() []driver.Value {
 		"STORING", "worker-a", attemptLease, int64(4), int64(1), nil,
 		int64(3), "file.bin", "minio", "42/4/file-0011223344556677.bin", "md5", "abc123",
 		float64(55.5), int64(555), int64(1000), "previous failure", nil,
+		"application/zip", int64(2048),
 	}
 }
 
@@ -91,6 +93,8 @@ func ownedAttemptState() *task.AttemptState {
 		Checksum:       &task.ChecksumInfo{ChecksumType: "md5", ChecksumValue: "abc123"},
 		Progress:       task.DownloadProgress{Progress: 55.5, DownloadedBytes: 555, TotalBytes: 1000},
 		ErrorMessage:   &message,
+		ContentType:    "application/zip",
+		FileSize:       2048,
 	}
 }
 
@@ -121,6 +125,7 @@ func TestAttemptRepo_LockAttemptState_NullColumnsMapToZeroValues(t *testing.T) {
 		"PENDING", nil, nil, int64(0), int64(0), nil,
 		int64(3), "file.bin", "", "", nil, nil,
 		nil, nil, nil, nil, nil,
+		"", int64(0),
 	})
 	attempts := NewAttemptRepo(db)
 
@@ -173,6 +178,7 @@ func TestAttemptRepo_GetAttemptState_ReadsWithoutLock(t *testing.T) {
 		"COMPLETED", nil, nil, int64(4), int64(1), nil,
 		int64(3), "file.bin", "minio", "42/4/file-0011223344556677.bin", "md5", "abc123",
 		float64(100), int64(1000), int64(1000), nil, completedAt,
+		"text/plain", int64(1000),
 	})
 
 	got, err := NewAttemptRepo(db).GetAttemptState(context.Background(), 42)
@@ -190,6 +196,8 @@ func TestAttemptRepo_GetAttemptState_ReadsWithoutLock(t *testing.T) {
 		Checksum:    &task.ChecksumInfo{ChecksumType: "md5", ChecksumValue: "abc123"},
 		Progress:    task.DownloadProgress{Progress: 100, DownloadedBytes: 1000, TotalBytes: 1000},
 		CompletedAt: &completedAt,
+		ContentType: "text/plain",
+		FileSize:    1000,
 	}, got)
 	steps, calls := fake.snapshot()
 	require.Equal(t, []string{"query"}, steps)
@@ -226,6 +234,7 @@ func TestAttemptRepo_SaveAttemptState_BindsEveryColumn(t *testing.T) {
 		"file.bin", "minio", "42/4/file-0011223344556677.bin", "md5", "abc123",
 		float64(55.5), int64(555), int64(1000), "previous failure",
 		time.Date(2026, 1, 2, 3, 7, 5, 0, time.UTC),
+		"application/zip", int64(2048),
 		int64(42),
 	}, calls[0].args)
 }
@@ -252,6 +261,7 @@ func TestAttemptRepo_SaveAttemptState_BindsNullsForClearedFields(t *testing.T) {
 		"file.bin", "", "", nil, nil,
 		float64(0), int64(0), int64(0), nil,
 		nil,
+		"", int64(0),
 		int64(42),
 	}, calls[0].args)
 }

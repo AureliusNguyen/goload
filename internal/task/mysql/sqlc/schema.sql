@@ -33,6 +33,8 @@ CREATE TABLE
         attempt_generation BIGINT UNSIGNED NOT NULL DEFAULT 0,
         retry_count INT UNSIGNED NOT NULL DEFAULT 0,
         next_attempt_at DATETIME(6) NULL DEFAULT NULL,
+        result_content_type VARCHAR(255) NOT NULL DEFAULT '',
+        result_file_size BIGINT NOT NULL DEFAULT 0,
         INDEX (of_account_id),
         INDEX (status)
     );

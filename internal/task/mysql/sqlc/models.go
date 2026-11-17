@@ -42,6 +42,8 @@ type Task struct {
 	AttemptGeneration uint64          `json:"attempt_generation"`
 	RetryCount        uint32          `json:"retry_count"`
 	NextAttemptAt     sql.NullTime    `json:"next_attempt_at"`
+	ResultContentType string          `json:"result_content_type"`
+	ResultFileSize    int64           `json:"result_file_size"`
 }
 
 type TaskOutbox struct {

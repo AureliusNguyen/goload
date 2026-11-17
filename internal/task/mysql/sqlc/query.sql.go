@@ -166,7 +166,8 @@ func (q *Queries) FetchUnsentOutboxAfter(ctx context.Context, arg FetchUnsentOut
 const getAttemptState = `-- name: GetAttemptState :one
 SELECT status, owner_id, lease_expires_at, attempt_generation, retry_count, next_attempt_at,
        max_retries, file_name, storage_type, storage_path, checksum_type, checksum_value,
-       progress, downloaded_bytes, total_bytes, error_message, completed_at
+       progress, downloaded_bytes, total_bytes, error_message, completed_at,
+       result_content_type, result_file_size
 FROM tasks
 WHERE id = ?
 `
@@ -189,6 +190,8 @@ type GetAttemptStateRow struct {
 	TotalBytes        sql.NullInt64   `json:"total_bytes"`
 	ErrorMessage      sql.NullString  `json:"error_message"`
 	CompletedAt       sql.NullTime    `json:"completed_at"`
+	ResultContentType string          `json:"result_content_type"`
+	ResultFileSize    int64           `json:"result_file_size"`
 }
 
 func (q *Queries) GetAttemptState(ctx context.Context, id uint64) (GetAttemptStateRow, error) {
@@ -212,12 +215,14 @@ func (q *Queries) GetAttemptState(ctx context.Context, id uint64) (GetAttemptSta
 		&i.TotalBytes,
 		&i.ErrorMessage,
 		&i.CompletedAt,
+		&i.ResultContentType,
+		&i.ResultFileSize,
 	)
 	return i, err
 }
 
 const getTaskById = `-- name: GetTaskById :one
-SELECT id, of_account_id, file_name, source_url, source_type, headers, source_auth, storage_type, storage_path, checksum_type, checksum_value, concurrency, max_speed, max_retries, timeout, status, progress, downloaded_bytes, total_bytes, error_message, metadata, created_at, updated_at, completed_at, last_accessed_at, expiration_days, owner_id, lease_expires_at, attempt_generation, retry_count, next_attempt_at
+SELECT id, of_account_id, file_name, source_url, source_type, headers, source_auth, storage_type, storage_path, checksum_type, checksum_value, concurrency, max_speed, max_retries, timeout, status, progress, downloaded_bytes, total_bytes, error_message, metadata, created_at, updated_at, completed_at, last_accessed_at, expiration_days, owner_id, lease_expires_at, attempt_generation, retry_count, next_attempt_at, result_content_type, result_file_size
 FROM tasks
 WHERE id = ?
 `
@@ -257,6 +262,8 @@ func (q *Queries) GetTaskById(ctx context.Context, id uint64) (Task, error) {
 		&i.AttemptGeneration,
 		&i.RetryCount,
 		&i.NextAttemptAt,
+		&i.ResultContentType,
+		&i.ResultFileSize,
 	)
 	return i, err
 }
@@ -352,7 +359,7 @@ func (q *Queries) ListReconcilable(ctx context.Context, arg ListReconcilablePara
 }
 
 const listTasks = `-- name: ListTasks :many
-SELECT id, of_account_id, file_name, source_url, source_type, headers, source_auth, storage_type, storage_path, checksum_type, checksum_value, concurrency, max_speed, max_retries, timeout, status, progress, downloaded_bytes, total_bytes, error_message, metadata, created_at, updated_at, completed_at, last_accessed_at, expiration_days, owner_id, lease_expires_at, attempt_generation, retry_count, next_attempt_at
+SELECT id, of_account_id, file_name, source_url, source_type, headers, source_auth, storage_type, storage_path, checksum_type, checksum_value, concurrency, max_speed, max_retries, timeout, status, progress, downloaded_bytes, total_bytes, error_message, metadata, created_at, updated_at, completed_at, last_accessed_at, expiration_days, owner_id, lease_expires_at, attempt_generation, retry_count, next_attempt_at, result_content_type, result_file_size
 FROM tasks
 WHERE of_account_id = ?
 ORDER BY created_at DESC
@@ -406,6 +413,8 @@ func (q *Queries) ListTasks(ctx context.Context, arg ListTasksParams) ([]Task, e
 			&i.AttemptGeneration,
 			&i.RetryCount,
 			&i.NextAttemptAt,
+			&i.ResultContentType,
+			&i.ResultFileSize,
 		); err != nil {
 			return nil, err
 		}
@@ -423,7 +432,8 @@ func (q *Queries) ListTasks(ctx context.Context, arg ListTasksParams) ([]Task, e
 const lockAttemptState = `-- name: LockAttemptState :one
 SELECT status, owner_id, lease_expires_at, attempt_generation, retry_count, next_attempt_at,
        max_retries, file_name, storage_type, storage_path, checksum_type, checksum_value,
-       progress, downloaded_bytes, total_bytes, error_message, completed_at
+       progress, downloaded_bytes, total_bytes, error_message, completed_at,
+       result_content_type, result_file_size
 FROM tasks
 WHERE id = ?
 FOR UPDATE
@@ -447,6 +457,8 @@ type LockAttemptStateRow struct {
 	TotalBytes        sql.NullInt64   `json:"total_bytes"`
 	ErrorMessage      sql.NullString  `json:"error_message"`
 	CompletedAt       sql.NullTime    `json:"completed_at"`
+	ResultContentType string          `json:"result_content_type"`
+	ResultFileSize    int64           `json:"result_file_size"`
 }
 
 func (q *Queries) LockAttemptState(ctx context.Context, id uint64) (LockAttemptStateRow, error) {
@@ -470,6 +482,8 @@ func (q *Queries) LockAttemptState(ctx context.Context, id uint64) (LockAttemptS
 		&i.TotalBytes,
 		&i.ErrorMessage,
 		&i.CompletedAt,
+		&i.ResultContentType,
+		&i.ResultFileSize,
 	)
 	return i, err
 }
@@ -494,7 +508,8 @@ const saveAttemptState = `-- name: SaveAttemptState :exec
 UPDATE tasks
 SET status = ?, owner_id = ?, lease_expires_at = ?, attempt_generation = ?, retry_count = ?, next_attempt_at = ?,
     file_name = ?, storage_type = ?, storage_path = ?, checksum_type = ?, checksum_value = ?,
-    progress = ?, downloaded_bytes = ?, total_bytes = ?, error_message = ?, completed_at = ?
+    progress = ?, downloaded_bytes = ?, total_bytes = ?, error_message = ?, completed_at = ?,
+    result_content_type = ?, result_file_size = ?
 WHERE id = ?
 `
 
@@ -515,6 +530,8 @@ type SaveAttemptStateParams struct {
 	TotalBytes        sql.NullInt64   `json:"total_bytes"`
 	ErrorMessage      sql.NullString  `json:"error_message"`
 	CompletedAt       sql.NullTime    `json:"completed_at"`
+	ResultContentType string          `json:"result_content_type"`
+	ResultFileSize    int64           `json:"result_file_size"`
 	ID                uint64          `json:"id"`
 }
 
@@ -536,6 +553,8 @@ func (q *Queries) SaveAttemptState(ctx context.Context, arg SaveAttemptStatePara
 		arg.TotalBytes,
 		arg.ErrorMessage,
 		arg.CompletedAt,
+		arg.ResultContentType,
+		arg.ResultFileSize,
 		arg.ID,
 	)
 	return err

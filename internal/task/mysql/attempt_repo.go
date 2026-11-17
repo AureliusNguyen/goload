@@ -95,6 +95,8 @@ func (r *attemptRepo) SaveAttemptState(ctx context.Context, state *task.AttemptS
 		TotalBytes:        sql.NullInt64{Int64: state.Progress.TotalBytes, Valid: true},
 		ErrorMessage:      errorMessage,
 		CompletedAt:       nullTime(state.CompletedAt, time.Second),
+		ResultContentType: state.ContentType,
+		ResultFileSize:    state.FileSize,
 		ID:                state.TaskID,
 	})
 }
@@ -130,6 +132,8 @@ func attemptStateFromRow(taskID uint64, row sqlc.GetAttemptStateRow) *task.Attem
 		// same value back.
 		StorageType: storage.Type(row.StorageType),
 		StoragePath: row.StoragePath,
+		ContentType: row.ResultContentType,
+		FileSize:    row.ResultFileSize,
 		Progress: task.DownloadProgress{
 			Progress:        row.Progress.Float64,
 			DownloadedBytes: row.DownloadedBytes.Int64,

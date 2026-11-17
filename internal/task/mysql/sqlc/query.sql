@@ -103,14 +103,16 @@ WHERE id = ? AND sent_at IS NULL;
 -- name: GetAttemptState :one
 SELECT status, owner_id, lease_expires_at, attempt_generation, retry_count, next_attempt_at,
        max_retries, file_name, storage_type, storage_path, checksum_type, checksum_value,
-       progress, downloaded_bytes, total_bytes, error_message, completed_at
+       progress, downloaded_bytes, total_bytes, error_message, completed_at,
+       result_content_type, result_file_size
 FROM tasks
 WHERE id = ?;
 
 -- name: LockAttemptState :one
 SELECT status, owner_id, lease_expires_at, attempt_generation, retry_count, next_attempt_at,
        max_retries, file_name, storage_type, storage_path, checksum_type, checksum_value,
-       progress, downloaded_bytes, total_bytes, error_message, completed_at
+       progress, downloaded_bytes, total_bytes, error_message, completed_at,
+       result_content_type, result_file_size
 FROM tasks
 WHERE id = ?
 FOR UPDATE;
@@ -119,7 +121,8 @@ FOR UPDATE;
 UPDATE tasks
 SET status = ?, owner_id = ?, lease_expires_at = ?, attempt_generation = ?, retry_count = ?, next_attempt_at = ?,
     file_name = ?, storage_type = ?, storage_path = ?, checksum_type = ?, checksum_value = ?,
-    progress = ?, downloaded_bytes = ?, total_bytes = ?, error_message = ?, completed_at = ?
+    progress = ?, downloaded_bytes = ?, total_bytes = ?, error_message = ?, completed_at = ?,
+    result_content_type = ?, result_file_size = ?
 WHERE id = ?;
 
 -- name: ListReconcilable :many
