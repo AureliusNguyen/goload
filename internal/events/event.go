@@ -65,12 +65,6 @@ type TaskPausedEvent struct {
 	PausedAt time.Time `json:"paused_at"`
 }
 
-// TaskResumedEvent represents task resume requests
-type TaskResumedEvent struct {
-	TaskID    uint64    `json:"task_id"`
-	ResumedAt time.Time `json:"resumed_at"`
-}
-
 // TaskCancelledEvent represents task cancellation requests
 type TaskCancelledEvent struct {
 	TaskID      uint64    `json:"task_id"`
@@ -119,7 +113,6 @@ const (
 	EventTaskCompleted       EventType = "task.completed"
 	EventTaskFailed          EventType = "task.failed"
 	EventTaskPaused          EventType = "task.paused"
-	EventTaskResumed         EventType = "task.resumed"
 	EventTaskCancelled       EventType = "task.cancelled"
 	EventTaskRetried         EventType = "task.retried"
 

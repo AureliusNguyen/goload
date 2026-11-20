@@ -77,6 +77,7 @@ func main() {
 	repo := taskmysql.NewTaskRepo(db)
 	tx := taskmysql.NewTxManager(db)
 	outboxRepo := taskmysql.NewOutboxRepo(db)
+	attemptRepo := taskmysql.NewAttemptRepo(db)
 
 	// The task service requires a message transport: it dispatches TaskCreated
 	// through the outbox relay and publishes task lifecycle events. Without a
@@ -201,7 +202,7 @@ func main() {
 		svcOpts = append(svcOpts, taskpkg.WithTokenStore(ts))
 	}
 
-	svc := taskpkg.NewService(repo, *dep, tx, outboxRepo, append(svcOpts, taskpkg.WithLogger(logger))...)
+	svc := taskpkg.NewService(repo, *dep, tx, outboxRepo, attemptRepo, append(svcOpts, taskpkg.WithLogger(logger))...)
 
 	endpointSet := taskendpoint.New(svc)
 
@@ -232,9 +233,13 @@ func main() {
 		if err != nil {
 			level.Error(logger).Log("msg", "failed to create kafka subscriber for task service", "err", err)
 		} else {
+			// The download workers of this deployment still report through
+			// lifecycle events: they cannot reach the ownership API until it
+			// is exposed over gRPC. Remove WithLegacyStateWrites with that
+			// exposure.
 			taskEventConsumer = tasktransport.NewEventConsumer(svc, taskSub, func(ctx context.Context, err error) {
 				level.Error(logger).Log("msg", "task event consumer error", "err", err)
-			})
+			}, tasktransport.WithLegacyStateWrites())
 		}
 	}
 

@@ -14,12 +14,15 @@ const (
 	// is published on the existing transport.
 	OutboxDestinationDispatch = "dispatch"
 	// OutboxDestinationLifecycle marks status, progress, completed and failed
-	// notifications. It is recorded for later work and not produced yet.
+	// notifications. Only the completion event is produced so far.
 	OutboxDestinationLifecycle = "lifecycle"
 
 	// OutboxEventTaskCreated is the event_type of a TaskCreated outbox row and
 	// the "eventType" metadata value of the published message.
 	OutboxEventTaskCreated = "TaskCreated"
+	// OutboxEventTaskCompleted is the event_type of the lifecycle row written
+	// by CompleteAttempt in the transaction that completes the task.
+	OutboxEventTaskCompleted = "TaskCompleted"
 )
 
 // OutboxEvent is one row of the task_outbox table: an event that must be
@@ -87,6 +90,43 @@ func NewTaskCreatedOutboxEvent(t *Task) (OutboxEvent, error) {
 		AggregateID: t.ID,
 		Destination: OutboxDestinationDispatch,
 		EventType:   OutboxEventTaskCreated,
+		Payload:     payload,
+		CreatedAt:   time.Now().UTC(),
+	}, nil
+}
+
+// NewTaskCompletedOutboxEvent builds the lifecycle outbox row announcing that
+// an attempt completed a task. The payload is the events.TaskCompletedEvent
+// JSON already used on the task.completed topic. It is a notification only:
+// the task row is updated by the transaction that stores this event, and no
+// consumer may apply it to the task row again.
+func NewTaskCompletedOutboxEvent(taskID uint64, result events.AttemptResult, completedAt time.Time) (OutboxEvent, error) {
+	event := events.TaskCompletedEvent{
+		TaskID:      taskID,
+		FileName:    result.FileName,
+		FileSize:    result.FileSize,
+		ContentType: result.ContentType,
+		StorageType: result.StorageType.String(),
+		StorageKey:  result.StorageKey,
+		CompletedAt: completedAt,
+	}
+	if result.Checksum != nil {
+		event.Checksum = &events.ChecksumInfo{
+			ChecksumType:  result.Checksum.ChecksumType,
+			ChecksumValue: result.Checksum.ChecksumValue,
+		}
+	}
+
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return OutboxEvent{}, err
+	}
+
+	return OutboxEvent{
+		ID:          generateUUID(),
+		AggregateID: taskID,
+		Destination: OutboxDestinationLifecycle,
+		EventType:   OutboxEventTaskCompleted,
 		Payload:     payload,
 		CreatedAt:   time.Now().UTC(),
 	}, nil

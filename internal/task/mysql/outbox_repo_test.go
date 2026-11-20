@@ -22,10 +22,11 @@ import (
 // repository sends, so SQL text, arguments and transaction boundaries can be
 // asserted without a MySQL server.
 type fakeDB struct {
-	mu    sync.Mutex
-	steps []string         // "begin", "exec", "query", "commit", "rollback"
-	calls []fakeCall       // every exec and query, in order
-	rows  [][]driver.Value // rows handed to the next query
+	mu      sync.Mutex
+	steps   []string         // "begin", "exec", "query", "commit", "rollback"
+	calls   []fakeCall       // every exec and query, in order
+	rows    [][]driver.Value // rows handed to the next query
+	columns []string         // column names of rows; nil means the task_outbox columns
 }
 
 type fakeCall struct {
@@ -58,6 +59,12 @@ func (f *fakeDB) takeRows() [][]driver.Value {
 	rows := f.rows
 	f.rows = nil
 	return rows
+}
+
+func (f *fakeDB) rowColumns() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.columns
 }
 
 func (f *fakeDB) snapshot() ([]string, []fakeCall) {
@@ -98,7 +105,7 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 
 func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
 	c.db.record("query", query, args, c.inTx)
-	return &fakeRows{rows: c.db.takeRows()}, nil
+	return &fakeRows{columns: c.db.rowColumns(), rows: c.db.takeRows()}, nil
 }
 
 type fakeTx struct{ conn *fakeConn }
@@ -116,11 +123,15 @@ func (t *fakeTx) Rollback() error {
 }
 
 type fakeRows struct {
-	rows [][]driver.Value
-	next int
+	columns []string
+	rows    [][]driver.Value
+	next    int
 }
 
 func (r *fakeRows) Columns() []string {
+	if r.columns != nil {
+		return r.columns
+	}
 	// The outbox fetch queries are SELECT *, so the row carries every column,
 	// sent_at included.
 	return []string{"id", "aggregate_id", "destination", "event_type", "payload", "created_at", "sent_at"}

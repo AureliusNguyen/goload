@@ -81,6 +81,9 @@ type service struct {
 	// outbox stores events written in the same transaction as task rows; the
 	// outbox relay publishes them after commit.
 	outbox OutboxRepository
+	// attempts loads and stores task ownership state under a row lock. Every
+	// user-driven status transition goes through it.
+	attempts AttemptRepository
 	// optional presigner for storage backends that support presigning
 	presigner storage.Presigner
 	// optional storage/presigner for pre-processing large task source payloads (e.g. uploaded .torrent files)
@@ -172,14 +175,16 @@ func NewService(
 	pub Publisher,
 	tx TxManager,
 	outbox OutboxRepository,
+	attempts AttemptRepository,
 	opts ...ServiceOption,
 ) Service {
 	s := &service{
-		repo:   repo,
-		pub:    pub,
-		tx:     tx,
-		outbox: outbox,
-		logger: log.NewNopLogger(),
+		repo:     repo,
+		pub:      pub,
+		tx:       tx,
+		outbox:   outbox,
+		attempts: attempts,
+		logger:   log.NewNopLogger(),
 	}
 	for _, o := range opts {
 		o(s)
@@ -499,36 +504,51 @@ func (s *service) DeleteTask(ctx context.Context, id uint64) error {
 	return nil
 }
 
-func (s *service) PauseTask(ctx context.Context, taskID uint64) error {
-	task, err := s.repo.GetByID(ctx, taskID)
-	if err != nil {
-		return &errors.Error{
-			Code:    errors.ErrCodeNotFound,
-			Message: "Task not found",
-			Cause:   err,
-		}
-	}
-
-	if task.Status != StatusDownloading {
-		return &errors.Error{
-			Code:    errors.ErrCodeInvalidInput,
-			Message: "Only downloading tasks can be paused",
-			Cause:   nil,
-		}
-	}
-
-	task.Status = StatusPaused
-
-	if err := s.tx.DoInTx(ctx, func(ctx context.Context) error {
-		_, err := s.repo.Update(ctx, task)
+// transitionTask applies one user-driven status transition in one
+// transaction: lock the task row, apply the transition, save it, then run
+// after (event publication or re-dispatch) on the same transaction. A
+// rejected transition returns its error and writes nothing.
+func (s *service) transitionTask(
+	ctx context.Context,
+	taskID uint64,
+	apply func(st *AttemptState) error,
+	after func(ctx context.Context) error,
+) error {
+	return s.tx.DoInTx(ctx, func(ctx context.Context) error {
+		st, err := lockAttemptState(ctx, s.attempts, taskID)
 		if err != nil {
-			return &errors.Error{
-				Code:    errors.ErrCodeInternal,
-				Message: "Failed to pause task",
-				Cause:   err,
-			}
+			return err
 		}
+		if err := apply(st); err != nil {
+			return err
+		}
+		if err := saveAttemptState(ctx, s.attempts, st); err != nil {
+			return err
+		}
+		return after(ctx)
+	})
+}
 
+// redispatch writes a TaskCreated outbox row for an existing task on the
+// transaction carried by ctx, so a download worker picks the task up once the
+// outbox relay publishes it. Only "task.created" events trigger execution;
+// PublishTaskStatusUpdated is not consumed by the download service.
+func (s *service) redispatch(ctx context.Context, taskID uint64, failMessage string) error {
+	task, err := s.repo.GetByID(ctx, taskID)
+	if err == nil {
+		err = s.enqueueTaskCreated(ctx, task)
+	}
+	if err != nil {
+		return &errors.Error{Code: errors.ErrCodeInternal, Message: failMessage, Cause: err}
+	}
+	return nil
+}
+
+// PauseTask moves a DOWNLOADING task to PAUSED and retires its attempt: the
+// owner is cleared, so the worker's next fencing-checked call is rejected.
+// The bytes downloaded so far are discarded (no byte-level resume yet).
+func (s *service) PauseTask(ctx context.Context, taskID uint64) error {
+	return s.transitionTask(ctx, taskID, (*AttemptState).pause, func(ctx context.Context) error {
 		if err := s.pub.PublishTaskPaused(ctx, taskID); err != nil {
 			return &errors.Error{
 				Code:    errors.ErrCodeInternal,
@@ -536,91 +556,23 @@ func (s *service) PauseTask(ctx context.Context, taskID uint64) error {
 				Cause:   err,
 			}
 		}
-
 		return nil
-	}); err != nil {
-		return err
-	}
-
-	return nil
+	})
 }
 
+// ResumeTask moves a PAUSED task back to PENDING and re-dispatches it. A new
+// attempt claims it and downloads from zero.
 func (s *service) ResumeTask(ctx context.Context, taskID uint64) error {
-	task, err := s.repo.GetByID(ctx, taskID)
-	if err != nil {
-		return &errors.Error{
-			Code:    errors.ErrCodeNotFound,
-			Message: "Task not found",
-			Cause:   err,
-		}
-	}
-
-	if task.Status != StatusPaused {
-		return &errors.Error{
-			Code:    errors.ErrCodeInvalidInput,
-			Message: "Only paused tasks can be resumed",
-			Cause:   nil,
-		}
-	}
-
-	task.Status = StatusDownloading
-
-	if err := s.tx.DoInTx(ctx, func(ctx context.Context) error {
-		_, err := s.repo.Update(ctx, task)
-		if err != nil {
-			return &errors.Error{
-				Code:    errors.ErrCodeInternal,
-				Message: "Failed to resume task",
-				Cause:   err,
-			}
-		}
-
-		if err := s.pub.PublishTaskResumed(ctx, taskID); err != nil {
-			return &errors.Error{
-				Code:    errors.ErrCodeInternal,
-				Message: "failed to publish task resumed event",
-				Cause:   err,
-			}
-		}
-
-		return nil
-	}); err != nil {
-		return err
-	}
-
-	return nil
+	return s.transitionTask(ctx, taskID, (*AttemptState).resume, func(ctx context.Context) error {
+		return s.redispatch(ctx, taskID, "failed to enqueue task created event for resume")
+	})
 }
 
+// CancelTask moves any task that is not COMPLETED or CANCELLED to CANCELLED
+// and clears its ownership. Cancellation of an active attempt is cooperative:
+// the worker's next fencing-checked call is rejected and it stops.
 func (s *service) CancelTask(ctx context.Context, taskID uint64) error {
-	task, err := s.repo.GetByID(ctx, taskID)
-	if err != nil {
-		return &errors.Error{
-			Code:    errors.ErrCodeNotFound,
-			Message: "Task not found",
-			Cause:   err,
-		}
-	}
-
-	if task.Status == StatusCompleted || task.Status == StatusCancelled {
-		return &errors.Error{
-			Code:    errors.ErrCodeInvalidInput,
-			Message: "Completed or cancelled tasks cannot be cancelled",
-			Cause:   nil,
-		}
-	}
-
-	task.Status = StatusCancelled
-
-	if err := s.tx.DoInTx(ctx, func(ctx context.Context) error {
-		_, err := s.repo.Update(ctx, task)
-		if err != nil {
-			return &errors.Error{
-				Code:    errors.ErrCodeInternal,
-				Message: "Failed to cancel task",
-				Cause:   err,
-			}
-		}
-
+	return s.transitionTask(ctx, taskID, (*AttemptState).cancel, func(ctx context.Context) error {
 		if err := s.pub.PublishTaskCancelled(ctx, taskID); err != nil {
 			return &errors.Error{
 				Code:    errors.ErrCodeInternal,
@@ -628,63 +580,16 @@ func (s *service) CancelTask(ctx context.Context, taskID uint64) error {
 				Cause:   err,
 			}
 		}
-
 		return nil
-	}); err != nil {
-		return err
-	}
-
-	return nil
+	})
 }
 
+// RetryTask moves a FAILED task back to PENDING with a fresh retry budget and
+// re-dispatches it.
 func (s *service) RetryTask(ctx context.Context, taskID uint64) error {
-	task, err := s.repo.GetByID(ctx, taskID)
-	if err != nil {
-		return &errors.Error{
-			Code:    errors.ErrCodeNotFound,
-			Message: "Task not found",
-			Cause:   err,
-		}
-	}
-
-	if task.Status != StatusFailed {
-		return &errors.Error{
-			Code:    errors.ErrCodeInvalidInput,
-			Message: "Only failed tasks can be retried",
-			Cause:   nil,
-		}
-	}
-
-	task.Status = StatusPending
-
-	if err := s.tx.DoInTx(ctx, func(ctx context.Context) error {
-		_, err := s.repo.Update(ctx, task)
-		if err != nil {
-			return &errors.Error{
-				Code:    errors.ErrCodeInternal,
-				Message: "Failed to retry task",
-				Cause:   err,
-			}
-		}
-
-		// Record a TaskCreated outbox row in the same transaction so the download
-		// worker re-picks the task once the relay publishes it.
-		// PublishTaskStatusUpdated is NOT consumed by the download service;
-		// only "task.created" events trigger execution.
-		if err := s.enqueueTaskCreated(ctx, task); err != nil {
-			return &errors.Error{
-				Code:    errors.ErrCodeInternal,
-				Message: "failed to enqueue task created event for retry",
-				Cause:   err,
-			}
-		}
-
-		return nil
-	}); err != nil {
-		return err
-	}
-
-	return nil
+	return s.transitionTask(ctx, taskID, (*AttemptState).retry, func(ctx context.Context) error {
+		return s.redispatch(ctx, taskID, "failed to enqueue task created event for retry")
+	})
 }
 
 func (s *service) UpdateTaskStoragePath(ctx context.Context, id uint64, storagePath string) error {

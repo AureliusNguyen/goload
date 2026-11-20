@@ -119,6 +119,11 @@ func (f *FTPDownloader) connect(
 		parsedURL.Host,
 		ftp.DialWithContext(ctx),
 		ftp.DialWithTimeout(f.timeout),
+		// Bound the control-connection wait during shutdown (Quit). Without it
+		// a silent server can block Quit indefinitely; the download service
+		// closes readers from a detached watcher, so an unbounded Quit would
+		// strand that goroutine and leak the connection.
+		ftp.DialWithShutTimeout(f.timeout),
 	)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("dial ftp host %q: %w", parsedURL.Host, err)

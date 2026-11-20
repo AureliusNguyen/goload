@@ -99,3 +99,39 @@ LIMIT ?;
 UPDATE task_outbox
 SET sent_at = ?
 WHERE id = ? AND sent_at IS NULL;
+
+-- name: GetAttemptState :one
+SELECT status, owner_id, lease_expires_at, attempt_generation, retry_count, next_attempt_at,
+       max_retries, file_name, storage_type, storage_path, checksum_type, checksum_value,
+       progress, downloaded_bytes, total_bytes, error_message, completed_at,
+       result_content_type, result_file_size
+FROM tasks
+WHERE id = ?;
+
+-- name: LockAttemptState :one
+SELECT status, owner_id, lease_expires_at, attempt_generation, retry_count, next_attempt_at,
+       max_retries, file_name, storage_type, storage_path, checksum_type, checksum_value,
+       progress, downloaded_bytes, total_bytes, error_message, completed_at,
+       result_content_type, result_file_size
+FROM tasks
+WHERE id = ?
+FOR UPDATE;
+
+-- name: SaveAttemptState :exec
+UPDATE tasks
+SET status = ?, owner_id = ?, lease_expires_at = ?, attempt_generation = ?, retry_count = ?, next_attempt_at = ?,
+    file_name = ?, storage_type = ?, storage_path = ?, checksum_type = ?, checksum_value = ?,
+    progress = ?, downloaded_bytes = ?, total_bytes = ?, error_message = ?, completed_at = ?,
+    result_content_type = ?, result_file_size = ?
+WHERE id = ?;
+
+-- name: ListReconcilable :many
+SELECT id, attempt_generation
+FROM tasks
+WHERE id > ?
+  AND (
+        (status = 'PENDING' AND owner_id IS NULL AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
+     OR (status IN ('DOWNLOADING', 'STORING') AND (lease_expires_at IS NULL OR lease_expires_at <= ?))
+      )
+ORDER BY id ASC
+LIMIT ?;

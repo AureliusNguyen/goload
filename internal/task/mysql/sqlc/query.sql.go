@@ -163,8 +163,66 @@ func (q *Queries) FetchUnsentOutboxAfter(ctx context.Context, arg FetchUnsentOut
 	return items, nil
 }
 
+const getAttemptState = `-- name: GetAttemptState :one
+SELECT status, owner_id, lease_expires_at, attempt_generation, retry_count, next_attempt_at,
+       max_retries, file_name, storage_type, storage_path, checksum_type, checksum_value,
+       progress, downloaded_bytes, total_bytes, error_message, completed_at,
+       result_content_type, result_file_size
+FROM tasks
+WHERE id = ?
+`
+
+type GetAttemptStateRow struct {
+	Status            string          `json:"status"`
+	OwnerID           sql.NullString  `json:"owner_id"`
+	LeaseExpiresAt    sql.NullTime    `json:"lease_expires_at"`
+	AttemptGeneration uint64          `json:"attempt_generation"`
+	RetryCount        uint32          `json:"retry_count"`
+	NextAttemptAt     sql.NullTime    `json:"next_attempt_at"`
+	MaxRetries        int32           `json:"max_retries"`
+	FileName          string          `json:"file_name"`
+	StorageType       string          `json:"storage_type"`
+	StoragePath       string          `json:"storage_path"`
+	ChecksumType      sql.NullString  `json:"checksum_type"`
+	ChecksumValue     sql.NullString  `json:"checksum_value"`
+	Progress          sql.NullFloat64 `json:"progress"`
+	DownloadedBytes   sql.NullInt64   `json:"downloaded_bytes"`
+	TotalBytes        sql.NullInt64   `json:"total_bytes"`
+	ErrorMessage      sql.NullString  `json:"error_message"`
+	CompletedAt       sql.NullTime    `json:"completed_at"`
+	ResultContentType string          `json:"result_content_type"`
+	ResultFileSize    int64           `json:"result_file_size"`
+}
+
+func (q *Queries) GetAttemptState(ctx context.Context, id uint64) (GetAttemptStateRow, error) {
+	row := q.db.QueryRowContext(ctx, getAttemptState, id)
+	var i GetAttemptStateRow
+	err := row.Scan(
+		&i.Status,
+		&i.OwnerID,
+		&i.LeaseExpiresAt,
+		&i.AttemptGeneration,
+		&i.RetryCount,
+		&i.NextAttemptAt,
+		&i.MaxRetries,
+		&i.FileName,
+		&i.StorageType,
+		&i.StoragePath,
+		&i.ChecksumType,
+		&i.ChecksumValue,
+		&i.Progress,
+		&i.DownloadedBytes,
+		&i.TotalBytes,
+		&i.ErrorMessage,
+		&i.CompletedAt,
+		&i.ResultContentType,
+		&i.ResultFileSize,
+	)
+	return i, err
+}
+
 const getTaskById = `-- name: GetTaskById :one
-SELECT id, of_account_id, file_name, source_url, source_type, headers, source_auth, storage_type, storage_path, checksum_type, checksum_value, concurrency, max_speed, max_retries, timeout, status, progress, downloaded_bytes, total_bytes, error_message, metadata, created_at, updated_at, completed_at, last_accessed_at, expiration_days
+SELECT id, of_account_id, file_name, source_url, source_type, headers, source_auth, storage_type, storage_path, checksum_type, checksum_value, concurrency, max_speed, max_retries, timeout, status, progress, downloaded_bytes, total_bytes, error_message, metadata, created_at, updated_at, completed_at, last_accessed_at, expiration_days, owner_id, lease_expires_at, attempt_generation, retry_count, next_attempt_at, result_content_type, result_file_size
 FROM tasks
 WHERE id = ?
 `
@@ -199,6 +257,13 @@ func (q *Queries) GetTaskById(ctx context.Context, id uint64) (Task, error) {
 		&i.CompletedAt,
 		&i.LastAccessedAt,
 		&i.ExpirationDays,
+		&i.OwnerID,
+		&i.LeaseExpiresAt,
+		&i.AttemptGeneration,
+		&i.RetryCount,
+		&i.NextAttemptAt,
+		&i.ResultContentType,
+		&i.ResultFileSize,
 	)
 	return i, err
 }
@@ -241,8 +306,60 @@ func (q *Queries) InsertOutbox(ctx context.Context, arg InsertOutboxParams) (sql
 	)
 }
 
+const listReconcilable = `-- name: ListReconcilable :many
+SELECT id, attempt_generation
+FROM tasks
+WHERE id > ?
+  AND (
+        (status = 'PENDING' AND owner_id IS NULL AND (next_attempt_at IS NULL OR next_attempt_at <= ?))
+     OR (status IN ('DOWNLOADING', 'STORING') AND (lease_expires_at IS NULL OR lease_expires_at <= ?))
+      )
+ORDER BY id ASC
+LIMIT ?
+`
+
+type ListReconcilableParams struct {
+	ID             uint64       `json:"id"`
+	NextAttemptAt  sql.NullTime `json:"next_attempt_at"`
+	LeaseExpiresAt sql.NullTime `json:"lease_expires_at"`
+	Limit          int32        `json:"limit"`
+}
+
+type ListReconcilableRow struct {
+	ID                uint64 `json:"id"`
+	AttemptGeneration uint64 `json:"attempt_generation"`
+}
+
+func (q *Queries) ListReconcilable(ctx context.Context, arg ListReconcilableParams) ([]ListReconcilableRow, error) {
+	rows, err := q.db.QueryContext(ctx, listReconcilable,
+		arg.ID,
+		arg.NextAttemptAt,
+		arg.LeaseExpiresAt,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListReconcilableRow
+	for rows.Next() {
+		var i ListReconcilableRow
+		if err := rows.Scan(&i.ID, &i.AttemptGeneration); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listTasks = `-- name: ListTasks :many
-SELECT id, of_account_id, file_name, source_url, source_type, headers, source_auth, storage_type, storage_path, checksum_type, checksum_value, concurrency, max_speed, max_retries, timeout, status, progress, downloaded_bytes, total_bytes, error_message, metadata, created_at, updated_at, completed_at, last_accessed_at, expiration_days
+SELECT id, of_account_id, file_name, source_url, source_type, headers, source_auth, storage_type, storage_path, checksum_type, checksum_value, concurrency, max_speed, max_retries, timeout, status, progress, downloaded_bytes, total_bytes, error_message, metadata, created_at, updated_at, completed_at, last_accessed_at, expiration_days, owner_id, lease_expires_at, attempt_generation, retry_count, next_attempt_at, result_content_type, result_file_size
 FROM tasks
 WHERE of_account_id = ?
 ORDER BY created_at DESC
@@ -291,6 +408,13 @@ func (q *Queries) ListTasks(ctx context.Context, arg ListTasksParams) ([]Task, e
 			&i.CompletedAt,
 			&i.LastAccessedAt,
 			&i.ExpirationDays,
+			&i.OwnerID,
+			&i.LeaseExpiresAt,
+			&i.AttemptGeneration,
+			&i.RetryCount,
+			&i.NextAttemptAt,
+			&i.ResultContentType,
+			&i.ResultFileSize,
 		); err != nil {
 			return nil, err
 		}
@@ -303,6 +427,65 @@ func (q *Queries) ListTasks(ctx context.Context, arg ListTasksParams) ([]Task, e
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockAttemptState = `-- name: LockAttemptState :one
+SELECT status, owner_id, lease_expires_at, attempt_generation, retry_count, next_attempt_at,
+       max_retries, file_name, storage_type, storage_path, checksum_type, checksum_value,
+       progress, downloaded_bytes, total_bytes, error_message, completed_at,
+       result_content_type, result_file_size
+FROM tasks
+WHERE id = ?
+FOR UPDATE
+`
+
+type LockAttemptStateRow struct {
+	Status            string          `json:"status"`
+	OwnerID           sql.NullString  `json:"owner_id"`
+	LeaseExpiresAt    sql.NullTime    `json:"lease_expires_at"`
+	AttemptGeneration uint64          `json:"attempt_generation"`
+	RetryCount        uint32          `json:"retry_count"`
+	NextAttemptAt     sql.NullTime    `json:"next_attempt_at"`
+	MaxRetries        int32           `json:"max_retries"`
+	FileName          string          `json:"file_name"`
+	StorageType       string          `json:"storage_type"`
+	StoragePath       string          `json:"storage_path"`
+	ChecksumType      sql.NullString  `json:"checksum_type"`
+	ChecksumValue     sql.NullString  `json:"checksum_value"`
+	Progress          sql.NullFloat64 `json:"progress"`
+	DownloadedBytes   sql.NullInt64   `json:"downloaded_bytes"`
+	TotalBytes        sql.NullInt64   `json:"total_bytes"`
+	ErrorMessage      sql.NullString  `json:"error_message"`
+	CompletedAt       sql.NullTime    `json:"completed_at"`
+	ResultContentType string          `json:"result_content_type"`
+	ResultFileSize    int64           `json:"result_file_size"`
+}
+
+func (q *Queries) LockAttemptState(ctx context.Context, id uint64) (LockAttemptStateRow, error) {
+	row := q.db.QueryRowContext(ctx, lockAttemptState, id)
+	var i LockAttemptStateRow
+	err := row.Scan(
+		&i.Status,
+		&i.OwnerID,
+		&i.LeaseExpiresAt,
+		&i.AttemptGeneration,
+		&i.RetryCount,
+		&i.NextAttemptAt,
+		&i.MaxRetries,
+		&i.FileName,
+		&i.StorageType,
+		&i.StoragePath,
+		&i.ChecksumType,
+		&i.ChecksumValue,
+		&i.Progress,
+		&i.DownloadedBytes,
+		&i.TotalBytes,
+		&i.ErrorMessage,
+		&i.CompletedAt,
+		&i.ResultContentType,
+		&i.ResultFileSize,
+	)
+	return i, err
 }
 
 const markOutboxSent = `-- name: MarkOutboxSent :exec
@@ -318,6 +501,62 @@ type MarkOutboxSentParams struct {
 
 func (q *Queries) MarkOutboxSent(ctx context.Context, arg MarkOutboxSentParams) error {
 	_, err := q.db.ExecContext(ctx, markOutboxSent, arg.SentAt, arg.ID)
+	return err
+}
+
+const saveAttemptState = `-- name: SaveAttemptState :exec
+UPDATE tasks
+SET status = ?, owner_id = ?, lease_expires_at = ?, attempt_generation = ?, retry_count = ?, next_attempt_at = ?,
+    file_name = ?, storage_type = ?, storage_path = ?, checksum_type = ?, checksum_value = ?,
+    progress = ?, downloaded_bytes = ?, total_bytes = ?, error_message = ?, completed_at = ?,
+    result_content_type = ?, result_file_size = ?
+WHERE id = ?
+`
+
+type SaveAttemptStateParams struct {
+	Status            string          `json:"status"`
+	OwnerID           sql.NullString  `json:"owner_id"`
+	LeaseExpiresAt    sql.NullTime    `json:"lease_expires_at"`
+	AttemptGeneration uint64          `json:"attempt_generation"`
+	RetryCount        uint32          `json:"retry_count"`
+	NextAttemptAt     sql.NullTime    `json:"next_attempt_at"`
+	FileName          string          `json:"file_name"`
+	StorageType       string          `json:"storage_type"`
+	StoragePath       string          `json:"storage_path"`
+	ChecksumType      sql.NullString  `json:"checksum_type"`
+	ChecksumValue     sql.NullString  `json:"checksum_value"`
+	Progress          sql.NullFloat64 `json:"progress"`
+	DownloadedBytes   sql.NullInt64   `json:"downloaded_bytes"`
+	TotalBytes        sql.NullInt64   `json:"total_bytes"`
+	ErrorMessage      sql.NullString  `json:"error_message"`
+	CompletedAt       sql.NullTime    `json:"completed_at"`
+	ResultContentType string          `json:"result_content_type"`
+	ResultFileSize    int64           `json:"result_file_size"`
+	ID                uint64          `json:"id"`
+}
+
+func (q *Queries) SaveAttemptState(ctx context.Context, arg SaveAttemptStateParams) error {
+	_, err := q.db.ExecContext(ctx, saveAttemptState,
+		arg.Status,
+		arg.OwnerID,
+		arg.LeaseExpiresAt,
+		arg.AttemptGeneration,
+		arg.RetryCount,
+		arg.NextAttemptAt,
+		arg.FileName,
+		arg.StorageType,
+		arg.StoragePath,
+		arg.ChecksumType,
+		arg.ChecksumValue,
+		arg.Progress,
+		arg.DownloadedBytes,
+		arg.TotalBytes,
+		arg.ErrorMessage,
+		arg.CompletedAt,
+		arg.ResultContentType,
+		arg.ResultFileSize,
+		arg.ID,
+	)
 	return err
 }
 

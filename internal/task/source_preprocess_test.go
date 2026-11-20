@@ -107,7 +107,7 @@ func TestCreateTask_MovesTorrentDataURLToMinioBeforeDBAndKafka(t *testing.T) {
 	eventPub := NewEventPublisher(fakeMsgPub)
 	outbox := &memOutbox{}
 
-	svc := NewService(repo, *eventPub, tx, outbox,
+	svc := NewService(repo, *eventPub, tx, outbox, newMemAttempts(),
 		WithTaskSourceStore(writer),
 		WithTaskSourcePresigner(presigner),
 	)
@@ -155,7 +155,7 @@ func TestCreateTask_MovesTorrentDataURLToMinioBeforeDBAndKafka(t *testing.T) {
 }
 
 func TestListTasks_RequiresFilter(t *testing.T) {
-	svc := NewService(&fakeRepo{}, Publisher{}, fakeTxManager{}, &memOutbox{})
+	svc := NewService(&fakeRepo{}, Publisher{}, fakeTxManager{}, &memOutbox{}, newMemAttempts())
 
 	_, err := svc.ListTasks(context.Background(), &ListTasksParam{})
 	require.Error(t, err)
@@ -169,7 +169,7 @@ func TestListTasks_ReturnsRepositoryTotal(t *testing.T) {
 			{ID: 2, OfAccountID: 7},
 		},
 	}
-	svc := NewService(repo, Publisher{}, fakeTxManager{}, &memOutbox{})
+	svc := NewService(repo, Publisher{}, fakeTxManager{}, &memOutbox{}, newMemAttempts())
 
 	out, err := svc.ListTasks(context.Background(), &ListTasksParam{
 		Filter: &TaskFilter{OfAccountID: 7},
@@ -182,7 +182,7 @@ func TestListTasks_ReturnsRepositoryTotal(t *testing.T) {
 
 func TestUpdateTaskErrorStoresErrorMessage(t *testing.T) {
 	repo := &fakeRepo{}
-	svc := NewService(repo, Publisher{}, fakeTxManager{}, &memOutbox{})
+	svc := NewService(repo, Publisher{}, fakeTxManager{}, &memOutbox{}, newMemAttempts())
 
 	err := svc.UpdateTaskError(context.Background(), 42, errors.New("boom"))
 	require.NoError(t, err)
@@ -198,7 +198,7 @@ func TestCreateTask_TorrentDataURLRequiresStorageConfig(t *testing.T) {
 	fakeMsgPub := &fakeMessagePublisher{}
 	eventPub := NewEventPublisher(fakeMsgPub)
 
-	svc := NewService(&fakeRepo{}, *eventPub, fakeTxManager{}, &memOutbox{})
+	svc := NewService(&fakeRepo{}, *eventPub, fakeTxManager{}, &memOutbox{}, newMemAttempts())
 	_, err := svc.CreateTask(context.Background(), &CreateTaskParam{
 		OfAccountID: 1,
 		FileName:    "upload.torrent",

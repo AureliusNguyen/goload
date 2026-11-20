@@ -313,7 +313,6 @@ func buildSystem(t *testing.T, brokers []string) (
 	allTopics := []string{
 		string(events.EventTaskCreated),
 		string(events.EventTaskPaused),
-		string(events.EventTaskResumed),
 		string(events.EventTaskCancelled),
 	}
 	sub := newSubscriber(t, brokers, "download-svc-test", allTopics)

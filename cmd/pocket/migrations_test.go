@@ -36,3 +36,30 @@ func TestRunMigrations_CreatesTaskOutbox(t *testing.T) {
 	))
 	require.Equal(t, []string{"task_outbox", "tasks"}, tables)
 }
+
+func TestRunMigrations_AddsOwnershipColumns(t *testing.T) {
+	pool, err := sqlitex.Open(filepath.Join(t.TempDir(), "pocket_ownership_test.db"), 0, 1)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pool.Close() })
+
+	require.NoError(t, runMigrations(pool))
+	// Pocket runs migrations on every start, so a second run must be a no-op.
+	require.NoError(t, runMigrations(pool))
+
+	conn := pool.Get(context.Background())
+	require.NotNil(t, conn)
+	defer pool.Put(conn)
+
+	columns := map[string]bool{}
+	require.NoError(t, sqlitex.ExecuteTransient(conn, `PRAGMA table_info(tasks);`, &sqlitex.ExecOptions{
+		ResultFunc: func(stmt *sqlite.Stmt) error {
+			columns[stmt.ColumnText(1)] = true
+			return nil
+		},
+	}))
+	for _, name := range []string{
+		"owner_id", "lease_expires_at", "attempt_generation", "retry_count", "next_attempt_at",
+	} {
+		require.True(t, columns[name], "tasks.%s must exist after runMigrations", name)
+	}
+}

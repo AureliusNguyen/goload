@@ -145,7 +145,7 @@ func main() {
 			atomic.StoreInt32(&ready, 1)
 			level.Info(logger).Log(
 				"transport", "Kafka",
-				"endpoints", "ExecuteTask, PauseTask, ResumeTask, CancelTask",
+				"endpoints", "ExecuteTask, PauseTask, CancelTask",
 				"msg", "serving event endpoints (Kafka)",
 			)
 			return consumer.Start(ctx)

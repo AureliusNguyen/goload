@@ -13,6 +13,41 @@ type subscription struct {
 	ch     chan *message.Message
 	ctx    context.Context
 	cancle context.CancelFunc
+
+	// mu makes sends and the channel close mutually exclusive. Senders hold
+	// RLock for the duration of a send; shutdown cancels ctx first (which
+	// unblocks any pending send), then takes the write lock to close ch.
+	mu     sync.RWMutex
+	closed bool
+}
+
+// send delivers m to the subscriber. It returns false if the subscription is
+// closed or its context ends before the message is accepted. It never sends on
+// a closed channel.
+func (s *subscription) send(m *message.Message) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed {
+		return false
+	}
+	select {
+	case s.ch <- m:
+		return true
+	case <-s.ctx.Done():
+		return false
+	}
+}
+
+// shutdown cancels the subscription and closes its channel exactly once, only
+// after in-flight sends have returned.
+func (s *subscription) shutdown() {
+	s.cancle()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.closed {
+		s.closed = true
+		close(s.ch)
+	}
 }
 
 type broker struct {
@@ -35,7 +70,7 @@ func (b *broker) Close() error {
 	defer b.mu.Unlock()
 	for topic, arr := range b.subs {
 		for _, sub := range arr {
-			close(sub.ch)
+			sub.shutdown()
 		}
 		delete(b.subs, topic)
 	}
@@ -91,7 +126,7 @@ func (s *Subscriber) Subscribe(ctx context.Context, topic string) (<-chan *messa
 	go func() {
 		<-ctx.Done()
 		s.b.removeSub(topic, sub)
-		close(ch)
+		sub.shutdown()
 	}()
 
 	return ch, nil
@@ -103,8 +138,7 @@ func (s *Subscriber) Close() error {
 	defer s.b.mu.Unlock()
 	for topic, arr := range s.b.subs {
 		for _, sub := range arr {
-			close(sub.ch)
-			sub.cancle()
+			sub.shutdown()
 		}
 		delete(s.b.subs, topic)
 	}

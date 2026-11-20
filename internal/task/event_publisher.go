@@ -99,30 +99,6 @@ func (ep *Publisher) PublishTaskPaused(ctx context.Context, taskID uint64) error
 	return ep.publisher.Publish("task.paused", msg)
 }
 
-// PublishTaskResumed publishes a task resumed event
-func (ep *Publisher) PublishTaskResumed(ctx context.Context, taskID uint64) error {
-	event := events.TaskResumedEvent{
-		TaskID:    taskID,
-		ResumedAt: time.Now(),
-	}
-
-	payload, err := json.Marshal(event)
-	if err != nil {
-		return err
-	}
-
-	msg := &message.Message{
-		UUID:    generateUUID(),
-		Payload: payload,
-		Metadata: message.Metadata{
-			"eventType": "TaskResumed",
-			"taskID":    formatTaskID(taskID),
-		},
-	}
-
-	return ep.publisher.Publish("task.resumed", msg)
-}
-
 // PublishTaskCancelled publishes a task cancelled event
 func (ep *Publisher) PublishTaskCancelled(ctx context.Context, taskID uint64) error {
 	event := events.TaskCancelledEvent{
@@ -241,6 +217,8 @@ func outboxTopic(eventType string) (string, bool) {
 	switch eventType {
 	case OutboxEventTaskCreated:
 		return "task.created", true
+	case OutboxEventTaskCompleted:
+		return "task.completed", true
 	default:
 		return "", false
 	}

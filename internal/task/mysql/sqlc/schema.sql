@@ -28,6 +28,13 @@ CREATE TABLE
         completed_at DATETIME,
         last_accessed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         expiration_days INT UNSIGNED DEFAULT 30, -- days
+        owner_id VARCHAR(64) NULL DEFAULT NULL,
+        lease_expires_at DATETIME(6) NULL DEFAULT NULL,
+        attempt_generation BIGINT UNSIGNED NOT NULL DEFAULT 0,
+        retry_count INT UNSIGNED NOT NULL DEFAULT 0,
+        next_attempt_at DATETIME(6) NULL DEFAULT NULL,
+        result_content_type VARCHAR(255) NOT NULL DEFAULT '',
+        result_file_size BIGINT NOT NULL DEFAULT 0,
         INDEX (of_account_id),
         INDEX (status)
     );

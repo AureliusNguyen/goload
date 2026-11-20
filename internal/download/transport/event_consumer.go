@@ -3,6 +3,8 @@ package downloadtransport
 import (
 	"context"
 	"encoding/json"
+	"sync"
+	"time"
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
@@ -13,20 +15,70 @@ import (
 	"github.com/yuisofull/goload/pkg/message"
 )
 
+const (
+	// DefaultRedeliveryDelay is how long a dispatch whose attempt could not be
+	// settled is held before it is negatively acknowledged. The in-memory bus
+	// redelivers at once, so without the pause a task service that keeps
+	// failing would turn redelivery into a busy loop.
+	DefaultRedeliveryDelay = time.Second
+
+	// attemptDrainTimeout bounds how long Start waits, after its context is
+	// cancelled, for running attempts to record their outcome.
+	attemptDrainTimeout = 15 * time.Second
+)
+
 // EventConsumer handles incoming events for the download service.
 type EventConsumer struct {
 	service    download.Service
 	subscriber message.Subscriber
 	logger     log.Logger
+
+	// attempts, when set, executes every task.created delivery as a claimed
+	// attempt and acknowledges it only once the outcome is settled. When nil
+	// the legacy path runs: ExecuteTask, acknowledged when the download starts.
+	attempts        download.AttemptRunner
+	redeliveryDelay time.Duration
+}
+
+// Option configures an EventConsumer.
+type Option func(*EventConsumer)
+
+// WithAttemptRunner switches task.created deliveries to the ownership path:
+// each one is executed with runner.RunAttempt (claim, heartbeat, commit) in
+// its own goroutine (after taking a download slot when the runner is a
+// download.AdmittingRunner), and the delivery is acknowledged only after RunAttempt
+// returned nil.
+func WithAttemptRunner(runner download.AttemptRunner) Option {
+	return func(ec *EventConsumer) { ec.attempts = runner }
+}
+
+// WithRedeliveryDelay overrides DefaultRedeliveryDelay. Values that are zero
+// or negative are ignored.
+func WithRedeliveryDelay(d time.Duration) Option {
+	return func(ec *EventConsumer) {
+		if d > 0 {
+			ec.redeliveryDelay = d
+		}
+	}
 }
 
 // NewEventConsumer creates a new event consumer for the download service.
-func NewEventConsumer(service download.Service, subscriber message.Subscriber, logger log.Logger) *EventConsumer {
-	return &EventConsumer{
-		service:    service,
-		subscriber: subscriber,
-		logger:     logger,
+func NewEventConsumer(
+	service download.Service,
+	subscriber message.Subscriber,
+	logger log.Logger,
+	opts ...Option,
+) *EventConsumer {
+	ec := &EventConsumer{
+		service:         service,
+		subscriber:      subscriber,
+		logger:          logger,
+		redeliveryDelay: DefaultRedeliveryDelay,
 	}
+	for _, o := range opts {
+		o(ec)
+	}
+	return ec
 }
 
 // Start begins consuming events.
@@ -43,30 +95,42 @@ func (ec *EventConsumer) Start(ctx context.Context) error {
 	}
 	level.Info(ec.logger).Log("msg", "subscription started", "topic", "task.paused")
 
-	taskResumedCh, err := ec.subscriber.Subscribe(ctx, string(events.EventTaskResumed))
-	if err != nil {
-		return err
-	}
-	level.Info(ec.logger).Log("msg", "subscription started", "topic", "task.resumed")
-
 	taskCancelledCh, err := ec.subscriber.Subscribe(ctx, string(events.EventTaskCancelled))
 	if err != nil {
 		return err
 	}
 	level.Info(ec.logger).Log("msg", "subscription started", "topic", "task.cancelled")
 
-	go ec.processTaskCreatedEvents(ctx, taskCreatedCh)
+	createdDone := make(chan struct{})
+	go func() {
+		defer close(createdDone)
+		ec.processTaskCreatedEvents(ctx, taskCreatedCh)
+	}()
 	go ec.processTaskPausedEvents(ctx, taskPausedCh)
-	go ec.processTaskResumedEvents(ctx, taskResumedCh)
 	go ec.processTaskCancelledEvents(ctx, taskCancelledCh)
 
 	level.Info(ec.logger).Log("msg", "event consumer running, awaiting context done")
 	<-ctx.Done()
 	level.Info(ec.logger).Log("msg", "event consumer stopping: context canceled")
+	if ec.attempts != nil {
+		// Running attempts stop with ctx and then record their outcome (a
+		// release). Give them a bounded time, so the process does not close
+		// the database underneath them.
+		select {
+		case <-createdDone:
+		case <-time.After(attemptDrainTimeout):
+			level.Warn(ec.logger).Log("msg", "attempts still running after the drain timeout")
+		}
+	}
 	return ctx.Err()
 }
 
 func (ec *EventConsumer) processTaskCreatedEvents(ctx context.Context, ch <-chan *message.Message) {
+	// Attempts run concurrently; the loop returns only after all of them
+	// have settled.
+	var running sync.WaitGroup
+	defer running.Wait()
+
 	for msg := range ch {
 		var event events.TaskCreatedEvent
 		if err := json.Unmarshal(msg.Payload, &event); err != nil {
@@ -83,6 +147,29 @@ func (ec *EventConsumer) processTaskCreatedEvents(ctx context.Context, ch <-chan
 			"source_url_len", len(req.SourceURL),
 		)
 
+		if ec.attempts != nil {
+			run := ec.attempts.RunAttempt
+			if adm, ok := ec.attempts.(download.AdmittingRunner); ok {
+				// Take the download slot BEFORE spawning the worker: the
+				// goroutines in flight are bounded by the slots, and a
+				// backlog waits in the subscription instead of piling up
+				// as goroutines.
+				if err := adm.Admit(ctx); err != nil {
+					// Only a cancelled ctx stops admission: hand the
+					// delivery back.
+					msg.Nack()
+					continue
+				}
+				run = adm.RunAdmittedAttempt
+			}
+			running.Add(1)
+			go func() {
+				defer running.Done()
+				ec.runAttempt(ctx, msg, req, run)
+			}()
+			continue
+		}
+
 		if err := ec.service.ExecuteTask(ctx, req); err != nil {
 			level.Error(ec.logger).Log("msg", "failed to execute task", "task_id", event.TaskID, "err", err)
 			if isPermanentDownloadError(err) {
@@ -97,15 +184,37 @@ func (ec *EventConsumer) processTaskCreatedEvents(ctx context.Context, ch <-chan
 	}
 }
 
+// runAttempt executes one dispatch as a claimed attempt and acknowledges the
+// delivery only once its outcome is settled: the result or the failure is
+// committed by the task service, or there was nothing to run (see
+// download.AttemptRunner).
+func (ec *EventConsumer) runAttempt(
+	ctx context.Context,
+	msg *message.Message,
+	req download.TaskRequest,
+	run func(context.Context, download.TaskRequest) error,
+) {
+	err := run(ctx, req)
+	if err == nil {
+		msg.Ack()
+		return
+	}
+
+	level.Error(ec.logger).Log(
+		"msg", "attempt not settled, delivery will be redelivered",
+		"task_id", req.TaskID,
+		"err", err,
+	)
+	select {
+	case <-time.After(ec.redeliveryDelay):
+	case <-ctx.Done():
+	}
+	msg.Nack()
+}
+
 func (ec *EventConsumer) processTaskPausedEvents(ctx context.Context, ch <-chan *message.Message) {
 	ec.processControlEvents(ch, "TaskPausedEvent", func(taskID uint64) error {
 		return ec.service.PauseTask(ctx, taskID)
-	})
-}
-
-func (ec *EventConsumer) processTaskResumedEvents(ctx context.Context, ch <-chan *message.Message) {
-	ec.processControlEvents(ch, "TaskResumedEvent", func(taskID uint64) error {
-		return ec.service.ResumeTask(ctx, taskID)
 	})
 }
 

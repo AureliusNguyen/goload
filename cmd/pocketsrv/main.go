@@ -17,6 +17,7 @@ import (
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/go-llsqlite/crawshaw/sqlitex"
+	"github.com/google/uuid"
 	"github.com/oklog/run"
 
 	"github.com/yuisofull/goload/internal/apigateway"
@@ -114,6 +115,8 @@ func main() {
 	taskRepo := tasksqlite.NewTaskRepo(pool)
 	tx := tasksqlite.NewTxManager(pool)
 	outboxRepo := tasksqlite.NewOutboxRepo(pool)
+	attemptRepo := tasksqlite.NewAttemptRepo(pool)
+	reconcileRepo := tasksqlite.NewReconcileRepo(pool)
 
 	var tokenManager auth.TokenManager
 	{
@@ -161,12 +164,23 @@ func main() {
 		inmemcache.New[string, storage.TokenMetadata](5*time.Minute),
 		secret,
 	)
-	taskSvc := task.NewService(taskRepo, *taskPub, tx, outboxRepo,
+	taskSvc := task.NewService(taskRepo, *taskPub, tx, outboxRepo, attemptRepo,
 		task.WithTokenStore(tokenStore),
 		task.WithTaskSourceStore(storageBackend),
 		task.WithTaskSourcePresigner(storageBackend),
 	)
 
+	// Ownership API: the download worker claims every task through it, renews
+	// the lease while it runs and commits the result under the generation of
+	// its claim. workerID identifies this process as the owner.
+	attemptSvc := task.NewAttemptService(attemptRepo, tx, outboxRepo)
+	workerID := uuid.NewString()
+	// Reconciler: dispatches due PENDING tasks and attempts whose lease
+	// expired again. This is what recovers work after a crash.
+	reconciler := task.NewReconciler(reconcileRepo, taskRepo, outboxRepo, task.WithReconcilerLogger(logger))
+
+	// Lifecycle events are notifications only; the task row is written
+	// through the ownership API.
 	taskEventConsumer := tasktransport.NewEventConsumer(taskSvc, sub, func(_ context.Context, err error) {
 		level.Error(logger).Log("msg", "task event consumer error", "err", err)
 	})
@@ -179,6 +193,7 @@ func main() {
 		download.WithErrorHandler(func(_ context.Context, err error) {
 			level.Error(logger).Log("msg", "download failed", "err", err)
 		}),
+		download.WithAttemptCoordinator(attemptSvc, workerID),
 	)
 	httpDL := downloader.NewHTTPDownloader(nil)
 	ftpDL := downloader.NewFTPDownloader(0)
@@ -189,7 +204,9 @@ func main() {
 	dlSvc.RegisterDownloader("FTP", ftpDL)
 	dlSvc.RegisterDownloader("BITTORRENT", btDL)
 
-	consumer := downloadtransport.NewEventConsumer(dlSvc, sub, logger)
+	// Every dispatch runs as a claimed attempt and is acknowledged only once
+	// its outcome is committed.
+	consumer := downloadtransport.NewEventConsumer(dlSvc, sub, logger, downloadtransport.WithAttemptRunner(dlSvc))
 
 	endpoints := apigateway.NewGatewayEndpoints(taskSvc, authMiddleware, authSvc)
 	handler := apigateway.NewHTTPHandlerWithDownload(endpoints, logger, storageBackend, tokenStore)
@@ -249,6 +266,15 @@ func main() {
 			return outboxRelay.Run(relayCtx)
 		}, func(error) {
 			cancelRelay()
+		})
+	}
+
+	{
+		reconcileCtx, cancelReconcile := context.WithCancel(ctx)
+		g.Add(func() error {
+			return reconciler.Run(reconcileCtx)
+		}, func(error) {
+			cancelReconcile()
 		})
 	}
 
@@ -322,7 +348,13 @@ func runMigrations(pool *sqlitex.Pool) error {
 	}
 
 	// Transactional outbox for task events (table task_outbox).
-	return tasksqlite.EnsureOutboxSchema(conn)
+	err = tasksqlite.EnsureOutboxSchema(conn)
+	if err != nil {
+		return err
+	}
+
+	// Task ownership columns: owner, lease, generation and retry state.
+	return tasksqlite.EnsureOwnershipSchema(conn)
 }
 
 func splitCSV(value string) []string {

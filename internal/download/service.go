@@ -32,8 +32,11 @@ type Service interface {
 	// ExecuteTask waits for a download slot, then starts the task asynchronously.
 	// Execution failures are reported through task events and the error handler.
 	ExecuteTask(ctx context.Context, req TaskRequest) error
+	// PauseTask stops the queued or running execution of a task the user
+	// paused. Nothing stays parked: the bytes read so far are discarded, and a
+	// later resume is a fresh dispatch that downloads from zero.
 	PauseTask(ctx context.Context, taskID uint64) error
-	ResumeTask(ctx context.Context, taskID uint64) error
+	// CancelTask stops the queued or running execution of a cancelled task.
 	CancelTask(ctx context.Context, taskID uint64) error
 	StreamFile(ctx context.Context, req FileStreamRequest) (*FileStreamResponse, error)
 	GetActiveTaskCount(ctx context.Context) int
@@ -46,11 +49,13 @@ type Registrar interface {
 }
 
 type taskExecution struct {
-	task           TaskRequest
-	ctx            context.Context
-	cancelFunc     context.CancelFunc
-	progress       Progress
-	progressReader *PausableProgressReader
+	task       TaskRequest
+	ctx        context.Context
+	cancelFunc context.CancelFunc
+	progress   Progress
+	// stopped is set (under service.mu) when the task service paused or
+	// cancelled the task. A stopped execution ends without reporting a failure.
+	stopped bool
 }
 
 type service struct {
@@ -66,6 +71,11 @@ type service struct {
 	sem                *semaphore.Weighted
 	lastProgressUpdate map[uint64]time.Time
 	progressMu         sync.Mutex
+	// attempts, workerID and renewInterval configure the attempt-aware path
+	// (RunAttempt). attempts is nil for the legacy event-driven path.
+	attempts      AttemptCoordinator
+	workerID      string
+	renewInterval time.Duration
 }
 
 type (
@@ -108,6 +118,7 @@ func NewService(storageBackend storage.Backend, publisher EventPublisher, opts .
 		errorHandler:       func(ctx context.Context, err error) {},
 		maxConcurrent:      5,
 		storageType:        storage.TypeLocal,
+		renewInterval:      DefaultRenewInterval,
 	}
 
 	for _, opt := range opts {
@@ -170,6 +181,11 @@ func (s *service) ExecuteTask(ctx context.Context, req TaskRequest) error {
 	// Wait before spawning so a full service applies backpressure to the consumer.
 	if err := s.sem.Acquire(taskCtx, 1); err != nil {
 		cleanup()
+		if s.isStopped(execution) {
+			// Paused or cancelled while it was still queued: nothing to run
+			// and nothing to redeliver.
+			return nil
+		}
 		return fmt.Errorf("failed to acquire download slot: %w", err)
 	}
 
@@ -183,23 +199,89 @@ func (s *service) ExecuteTask(ctx context.Context, req TaskRequest) error {
 		}()
 
 		if err := s.executeDownload(execution, downloader); err != nil {
+			if s.isStopped(execution) {
+				// Stopped by the task service (pause or cancel): the task row
+				// already says so, and a failure report would overwrite it.
+				return
+			}
 			s.markTaskFailed(taskCtx, req.TaskID, err)
 		}
 	}()
 	return nil
 }
 
-// executeDownload performs the actual download and storage
-func (s *service) executeDownload(execution *taskExecution, downloader Downloader) error {
+// transferHooks are the points where the legacy event path and the attempt
+// path differ while one file is downloaded and stored.
+type transferHooks struct {
+	// downloading runs first, before the source is contacted.
+	downloading func(ctx context.Context) error
+	// progress receives every progress snapshot the transfer produces.
+	progress func(ctx context.Context, p Progress)
+	// storing runs exactly once, when the source stream is drained and the
+	// object is about to be finalized. A failure aborts the transfer.
+	storing func(ctx context.Context) error
+}
+
+// transferResult describes the object one transfer stored.
+type transferResult struct {
+	FileName    string
+	FileSize    int64
+	ContentType string
+	MD5         string
+	StorageKey  string
+}
+
+// drainNotifier reports the end of the source stream exactly once, before
+// io.EOF reaches the storage backend.
+type drainNotifier struct {
+	reader  io.Reader
+	onDrain func() error
+
+	mu    sync.Mutex
+	fired bool
+	err   error
+}
+
+func (d *drainNotifier) Read(p []byte) (int, error) {
+	n, err := d.reader.Read(p)
+	if err == io.EOF {
+		if hookErr := d.fire(); hookErr != nil {
+			return n, hookErr
+		}
+	}
+	return n, err
+}
+
+// fire runs the hook on its first call and returns that result on every call.
+func (d *drainNotifier) fire() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !d.fired {
+		d.fired = true
+		d.err = d.onDrain()
+	}
+	return d.err
+}
+
+// hookErr returns the hook's error; nil when it has not run or it succeeded.
+func (d *drainNotifier) hookErr() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.err
+}
+
+// transfer downloads the task's source and streams it into the storage key of
+// this execution. It publishes nothing itself; the hooks observe it.
+func (s *service) transfer(
+	execution *taskExecution,
+	downloader Downloader,
+	hooks transferHooks,
+) (*transferResult, error) {
 	taskReq := execution.task
 	ctx := execution.ctx
 
-	if err := s.publisher.PublishTaskStatusUpdated(ctx, events.TaskStatusUpdatedEvent{
-		TaskID:    taskReq.TaskID,
-		Status:    events.StatusDownloading,
-		UpdatedAt: time.Now(),
-	}); err != nil {
-		return &errors.Error{Code: errors.ErrCodeInternal, Message: "failed to publish task status", Cause: err}
+	if err := hooks.downloading(ctx); err != nil {
+		return nil, err
 	}
 
 	downloadOpts := DownloadOptions{
@@ -230,7 +312,7 @@ func (s *service) executeDownload(execution *taskExecution, downloader Downloade
 
 	metadata, err := downloader.GetFileInfo(ctx, taskReq.SourceURL, sourceAuth)
 	if err != nil {
-		return &errors.Error{Code: errors.ErrCodeInternal, Message: "failed to get file info", Cause: err}
+		return nil, &errors.Error{Code: errors.ErrCodeInternal, Message: "failed to get file info", Cause: err}
 	}
 
 	maxRetries := max(downloadOpts.MaxRetries, 0)
@@ -251,7 +333,7 @@ func (s *service) executeDownload(execution *taskExecution, downloader Downloade
 
 		// If this was the last attempt, fail
 		if attempt == maxAttempts {
-			return &errors.Error{
+			return nil, &errors.Error{
 				Code:    errors.ErrCodeInternal,
 				Message: "failed to start download",
 				Cause:   fmt.Errorf("downloading %s: %w", taskReq.SourceURL, dlErr),
@@ -267,13 +349,32 @@ func (s *service) executeDownload(execution *taskExecution, downloader Downloade
 		select {
 		case <-time.After(backoff + jitter):
 		case <-ctx.Done():
-			return &errors.Error{Code: errors.ErrCodeInternal, Message: "download cancelled", Cause: ctx.Err()}
+			return nil, &errors.Error{Code: errors.ErrCodeInternal, Message: "download cancelled", Cause: ctx.Err()}
 		}
 	}
-	defer reader.Close()
+	// Closing the reader interrupts a source Read blocked inside Store that
+	// does not itself observe ctx (FTP, BitTorrent). A dedicated watcher owns
+	// the close so the transfer never waits on it: Close can itself block (an
+	// FTP control-connection Quit waits for a server reply with no timeout),
+	// and a transfer that waited for Close would keep holding its download
+	// slot and, on the attempt path, keep its lease renewed by the heartbeat,
+	// which is the exact liveness bug this guards against. The watcher closes
+	// the reader exactly once, on cancellation or on normal return, and the
+	// transfer returns without waiting for Close to finish. A Close that hangs
+	// strands only this watcher goroutine and its own connection; it never
+	// stalls dispatch or lease recovery.
+	transferDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-transferDone:
+		}
+		_ = reader.Close()
+	}()
+	defer close(transferDone)
 
 	execution.progress.TotalBytes = totalSize
-	s.updateProgress(ctx, taskReq.TaskID, execution.progress)
+	hooks.progress(ctx, execution.progress)
 
 	progressReader := NewPausableProgressReader(reader, func(bytesRead int64) {
 		p := execution.progress
@@ -284,48 +385,94 @@ func (s *service) executeDownload(execution *taskExecution, downloader Downloade
 			}
 			p.UpdatedAt = time.Now()
 			execution.progress = p
-			s.updateProgress(ctx, taskReq.TaskID, p)
+			hooks.progress(ctx, p)
 		}
 	})
 
-	s.mu.Lock()
-	execution.progressReader = progressReader
-	s.mu.Unlock()
-
-	if err := s.publisher.PublishTaskStatusUpdated(ctx, events.TaskStatusUpdatedEvent{
-		TaskID:    taskReq.TaskID,
-		Status:    events.StatusStoring,
-		UpdatedAt: time.Now(),
-	}); err != nil {
-		return &errors.Error{Code: errors.ErrCodeInternal, Message: "failed to publish task status", Cause: err}
+	source := &drainNotifier{
+		reader:  progressReader,
+		onDrain: func() error { return hooks.storing(ctx) },
 	}
-
 	hash := md5.New()
-	teeReader := io.TeeReader(progressReader, hash)
 
 	storageKey := s.generateStorageKey(taskReq, metadata.FileName)
-	if err := s.storage.Store(ctx, storageKey, teeReader, &storage.FileMetadata{
+	storeErr := s.storage.Store(ctx, storageKey, io.TeeReader(source, hash), &storage.FileMetadata{
 		FileName:     metadata.FileName,
 		FileSize:     metadata.FileSize,
 		ContentType:  metadata.ContentType,
 		LastModified: time.Now(),
-	}); err != nil {
-		_ = s.storage.Delete(context.Background(), storageKey)
-		return &errors.Error{Code: errors.ErrCodeInternal, Message: "failed to store file", Cause: err}
+	})
+	if storeErr == nil {
+		// A backend that stops reading at the announced size never reads
+		// io.EOF, so make sure the storing step ran before the result is used.
+		storeErr = source.fire()
 	}
-	md5Hash := hex.EncodeToString(hash.Sum(nil))
+	if storeErr != nil {
+		// storageKey belongs to this attempt alone (it carries the attempt
+		// generation), so this cleanup cannot remove an object stored by
+		// another attempt of the same task.
+		_ = s.storage.Delete(context.Background(), storageKey)
+		if hookErr := source.hookErr(); hookErr != nil {
+			// The storing step itself failed (for an attempt: usually a
+			// fencing rejection). Report that, not the storage error it caused.
+			return nil, hookErr
+		}
+		return nil, &errors.Error{Code: errors.ErrCodeInternal, Message: "failed to store file", Cause: storeErr}
+	}
 
-	completedEvent := events.TaskCompletedEvent{
-		TaskID:      taskReq.TaskID,
+	return &transferResult{
 		FileName:    metadata.FileName,
 		FileSize:    totalSize,
 		ContentType: metadata.ContentType,
+		MD5:         hex.EncodeToString(hash.Sum(nil)),
+		StorageKey:  storageKey,
+	}, nil
+}
+
+// publishStatus publishes one status notification of the legacy path.
+func (s *service) publishStatus(ctx context.Context, taskID uint64, status events.TaskStatus) error {
+	if err := s.publisher.PublishTaskStatusUpdated(ctx, events.TaskStatusUpdatedEvent{
+		TaskID:    taskID,
+		Status:    status,
+		UpdatedAt: time.Now(),
+	}); err != nil {
+		return &errors.Error{Code: errors.ErrCodeInternal, Message: "failed to publish task status", Cause: err}
+	}
+	return nil
+}
+
+// executeDownload runs one transfer on the legacy event-driven path: status,
+// progress and the result are published as task events.
+func (s *service) executeDownload(execution *taskExecution, downloader Downloader) error {
+	taskReq := execution.task
+	ctx := execution.ctx
+
+	result, err := s.transfer(execution, downloader, transferHooks{
+		downloading: func(ctx context.Context) error {
+			return s.publishStatus(ctx, taskReq.TaskID, events.StatusDownloading)
+		},
+		progress: func(ctx context.Context, p Progress) {
+			s.updateProgress(ctx, taskReq.TaskID, p)
+		},
+		storing: func(ctx context.Context) error {
+			return s.publishStatus(ctx, taskReq.TaskID, events.StatusStoring)
+		},
+	})
+	if err != nil {
+		return err
+	}
+
+	completedEvent := events.TaskCompletedEvent{
+		TaskID:      taskReq.TaskID,
+		FileName:    result.FileName,
+		FileSize:    result.FileSize,
+		ContentType: result.ContentType,
 		Checksum: &events.ChecksumInfo{
 			ChecksumType:  "md5",
-			ChecksumValue: md5Hash,
+			ChecksumValue: result.MD5,
 		},
 		StorageType: s.storageType.String(),
-		StorageKey:  storageKey,
+		StorageKey:  result.StorageKey,
 		CompletedAt: time.Now(),
 	}
 
@@ -333,62 +480,33 @@ func (s *service) executeDownload(execution *taskExecution, downloader Downloade
 		return &errors.Error{Code: errors.ErrCodeInternal, Message: "failed to publish completion event", Cause: err}
 	}
 
-	execution.progress.DownloadedBytes = totalSize
+	execution.progress.DownloadedBytes = result.FileSize
 	execution.progress.Progress = 100.0
 	execution.progress.UpdatedAt = time.Now()
 	s.updateProgress(ctx, taskReq.TaskID, execution.progress)
 	return nil
 }
 
-// PauseTask pauses a running task
+// PauseTask stops the execution of a task the user paused. See Service.
 func (s *service) PauseTask(ctx context.Context, taskID uint64) error {
-	s.mu.RLock()
-	execution, exists := s.activeTasks[taskID]
-	var progressReader *PausableProgressReader
-	if exists {
-		progressReader = execution.progressReader
-	}
-	s.mu.RUnlock()
-
-	if !exists {
-		return &errors.Error{Code: errors.ErrCodeNotFound, Message: "task not found in active tasks"}
-	}
-
-	if progressReader == nil {
-		return &errors.Error{Code: errors.ErrCodeInvalidInput, Message: "task is not in a pausable state"}
-	}
-
-	progressReader.Pause()
-	return nil
+	return s.stopTask(taskID)
 }
 
-// ResumeTask resumes a paused task
-func (s *service) ResumeTask(ctx context.Context, taskID uint64) error {
-	s.mu.RLock()
-	execution, exists := s.activeTasks[taskID]
-	var progressReader *PausableProgressReader
-	if exists {
-		progressReader = execution.progressReader
-	}
-	s.mu.RUnlock()
-
-	if !exists {
-		return &errors.Error{Code: errors.ErrCodeNotFound, Message: "task not found in active tasks"}
-	}
-
-	if progressReader == nil {
-		return &errors.Error{Code: errors.ErrCodeInvalidInput, Message: "task is not in a resumable state"}
-	}
-
-	progressReader.Resume()
-	return nil
-}
-
-// CancelTask cancels a running task
+// CancelTask stops the execution of a cancelled task.
 func (s *service) CancelTask(ctx context.Context, taskID uint64) error {
-	s.mu.RLock()
+	return s.stopTask(taskID)
+}
+
+// stopTask marks a queued or running execution as stopped and cancels its
+// context. The execution unwinds on its own: it frees its slot, removes its
+// partial object and reports no failure.
+func (s *service) stopTask(taskID uint64) error {
+	s.mu.Lock()
 	execution, exists := s.activeTasks[taskID]
-	s.mu.RUnlock()
+	if exists {
+		execution.stopped = true
+	}
+	s.mu.Unlock()
 
 	if !exists {
 		return &errors.Error{Code: errors.ErrCodeNotFound, Message: "task not found in active tasks"}
@@ -396,6 +514,13 @@ func (s *service) CancelTask(ctx context.Context, taskID uint64) error {
 
 	execution.cancelFunc()
 	return nil
+}
+
+// isStopped reports whether the task service stopped the execution.
+func (s *service) isStopped(execution *taskExecution) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return execution.stopped
 }
 
 // StreamFile streams a file to the client
@@ -487,6 +612,12 @@ func (s *service) generateStorageKey(req TaskRequest, resolvedFileName string) s
 
 	finalName := fmt.Sprintf("%s-%x%s", name, urlHash[:8], ext)
 
+	// A claimed attempt writes under its own generation prefix, so two
+	// attempts of one task never share a key and an attempt's cleanup can
+	// only remove its own object. Generation 0 is the unclaimed legacy path.
+	if req.Generation > 0 {
+		return fmt.Sprintf("%d/%d/%s", req.TaskID, req.Generation, finalName)
+	}
 	return fmt.Sprintf("%d/%s", req.TaskID, finalName)
 }
 
