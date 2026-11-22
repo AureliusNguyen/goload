@@ -20,6 +20,7 @@ import (
 
 	"github.com/yuisofull/goload/internal/download"
 	downloadtransport "github.com/yuisofull/goload/internal/download/transport"
+	"github.com/yuisofull/goload/internal/observability"
 	"github.com/yuisofull/goload/internal/storage"
 	"github.com/yuisofull/goload/internal/task"
 	tasksqlite "github.com/yuisofull/goload/internal/task/sqlite"
@@ -138,6 +139,7 @@ type pipelineOpts struct {
 	// download services for the observability acceptance test.
 	taskMetrics task.Metrics
 	dlMetrics   download.Metrics
+	tracer      *observability.Tracer
 }
 
 func startPocketPipeline(t *testing.T, dl download.Downloader) *pocketPipeline {
@@ -191,8 +193,15 @@ func startPipeline(t *testing.T, dl download.Downloader, o pipelineOpts) *pocket
 	// Mirror the pocket binary: the in-memory bus drops a message with no
 	// subscriber, so outbox delivery must wait for the download consumer.
 	taskPub := task.NewEventPublisher(pub, task.WithOutboxTransport(task.NewRequireSubscriberTransport(pub)))
-	relay := task.NewOutboxRelay(outboxRepo, taskPub, task.WithOutboxPollInterval(10*time.Millisecond))
-	taskSvc := task.NewService(taskRepo, *taskPub, tx, outboxRepo, attemptRepo)
+	relayOpts := []task.OutboxRelayOption{task.WithOutboxPollInterval(10 * time.Millisecond)}
+	var svcOpts []task.ServiceOption
+	if o.tracer != nil {
+		relayOpts = append(relayOpts, task.WithOutboxRelayTracing(o.tracer))
+		svcOpts = append(svcOpts, task.WithTracing(o.tracer))
+		attemptOpts = append(attemptOpts, task.WithAttemptTracing(o.tracer))
+	}
+	relay := task.NewOutboxRelay(outboxRepo, taskPub, relayOpts...)
+	taskSvc := task.NewService(taskRepo, *taskPub, tx, outboxRepo, attemptRepo, svcOpts...)
 	attemptSvc := task.NewAttemptService(attemptRepo, tx, outboxRepo, attemptOpts...)
 	reconciler := task.NewReconciler(reconcileRepo, taskRepo, outboxRepo, reconcilerOpts...)
 	lifecycle := tasktransport.NewEventConsumer(taskSvc, sub, func(context.Context, error) {})
@@ -227,9 +236,15 @@ func startPipeline(t *testing.T, dl download.Downloader, o pipelineOpts) *pocket
 	if o.dlMetrics != nil {
 		dlOpts = append(dlOpts, download.WithMetrics(o.dlMetrics))
 	}
+	var workerOpts []downloadtransport.Option
+	if o.tracer != nil {
+		dlOpts = append(dlOpts, download.WithTracing(o.tracer))
+		workerOpts = append(workerOpts, downloadtransport.WithTracing(o.tracer))
+	}
 	dlSvc := download.NewService(store, download.NewDownloadEventPublisher(pub), dlOpts...)
 	dlSvc.RegisterDownloader("HTTPS", dl)
-	worker := downloadtransport.NewEventConsumer(dlSvc, sub, logger, downloadtransport.WithAttemptRunner(dlSvc))
+	workerOpts = append(workerOpts, downloadtransport.WithAttemptRunner(dlSvc))
+	worker := downloadtransport.NewEventConsumer(dlSvc, sub, logger, workerOpts...)
 
 	workerCtx, stopWorker := context.WithCancel(context.Background())
 	controlCtx, stopControl := context.WithCancel(context.Background())
@@ -272,8 +287,14 @@ func (p *pocketPipeline) stopAll() {
 // create stores a task the way the HTTP API does.
 func (p *pocketPipeline) create(t *testing.T) uint64 {
 	t.Helper()
+	return p.createIn(t, context.Background())
+}
 
-	created, err := p.tasks.CreateTask(context.Background(), &task.CreateTaskParam{
+// createIn stores a task within ctx, e.g. inside a request span.
+func (p *pocketPipeline) createIn(t *testing.T, ctx context.Context) uint64 {
+	t.Helper()
+
+	created, err := p.tasks.CreateTask(ctx, &task.CreateTaskParam{
 		OfAccountID: 7,
 		FileName:    "file.bin",
 		SourceURL:   "https://example.test/file.bin",
