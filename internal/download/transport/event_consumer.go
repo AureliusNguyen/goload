@@ -40,6 +40,7 @@ type EventConsumer struct {
 	attempts        download.AttemptRunner
 	redeliveryDelay time.Duration
 	metrics         download.Metrics
+	tracing         download.Tracing
 
 	// dispatchSubscriber, when set, is where task.created is consumed (RabbitMQ);
 	// control events stay on subscriber. Nil means all topics use subscriber.
@@ -84,6 +85,15 @@ func WithMetrics(m download.Metrics) Option {
 	return func(ec *EventConsumer) {
 		if m != nil {
 			ec.metrics = m
+		}
+	}
+}
+
+// WithTracing continues each dispatch's trace from its message headers.
+func WithTracing(t download.Tracing) Option {
+	return func(ec *EventConsumer) {
+		if t != nil {
+			ec.tracing = t
 		}
 	}
 }
@@ -241,7 +251,14 @@ func (ec *EventConsumer) runAttempt(
 	req download.TaskRequest,
 	run func(context.Context, download.TaskRequest) error,
 ) {
-	err := run(ctx, req)
+	// The span decorates the consumer's ctx (never replaces it), so a consumer
+	// shutdown still cancels the attempt.
+	runCtx, endSpan := ctx, func(error) {}
+	if ec.tracing != nil {
+		runCtx, endSpan = ec.tracing.StartConsume(ctx, msg.Metadata, req.TaskID)
+	}
+	err := run(runCtx, req)
+	endSpan(err)
 	if err == nil {
 		msg.Ack()
 		return

@@ -82,6 +82,7 @@ type service struct {
 	now func() time.Time
 
 	metrics Metrics
+	tracing Tracing
 }
 
 type (
@@ -127,6 +128,7 @@ func NewService(storageBackend storage.Backend, publisher EventPublisher, opts .
 		renewInterval:      DefaultRenewInterval,
 		now:                time.Now,
 		metrics:            nopMetrics{},
+		tracing:            nopTracing{},
 	}
 
 	for _, opt := range opts {
