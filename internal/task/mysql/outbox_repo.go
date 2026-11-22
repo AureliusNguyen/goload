@@ -38,9 +38,16 @@ func (r *outboxRepo) InsertUnsent(ctx context.Context, event task.OutboxEvent) e
 		EventType:   event.EventType,
 		Payload:     event.Payload,
 		// DATETIME(6) keeps microseconds; truncate so MySQL does not round up.
-		CreatedAt: event.CreatedAt.UTC().Truncate(time.Microsecond),
+		CreatedAt:    event.CreatedAt.UTC().Truncate(time.Microsecond),
+		TraceContext: traceContextColumn(event.TraceContext),
 	})
 	return err
+}
+
+// traceContextColumn stores an empty carrier as NULL and any other as JSON.
+func traceContextColumn(tc map[string]string) sql.NullString {
+	s, ok := task.MarshalTraceContext(tc)
+	return sql.NullString{String: s, Valid: ok}
 }
 
 func (r *outboxRepo) FetchUnsent(ctx context.Context, after task.OutboxCursor, limit int) ([]task.OutboxEvent, error) {
@@ -105,6 +112,9 @@ func outboxEventFromRow(row sqlc.TaskOutbox) task.OutboxEvent {
 	if row.SentAt.Valid {
 		sentAt := row.SentAt.Time
 		event.SentAt = &sentAt
+	}
+	if row.TraceContext.Valid {
+		event.TraceContext = task.UnmarshalTraceContext(row.TraceContext.String)
 	}
 	return event
 }

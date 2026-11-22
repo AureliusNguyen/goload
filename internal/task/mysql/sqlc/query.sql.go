@@ -108,7 +108,7 @@ func (q *Queries) DeleteTask(ctx context.Context, id uint64) error {
 }
 
 const fetchUnsentOutbox = `-- name: FetchUnsentOutbox :many
-SELECT id, aggregate_id, destination, event_type, payload, created_at, sent_at
+SELECT id, aggregate_id, destination, event_type, payload, created_at, sent_at, trace_context
 FROM task_outbox
 WHERE sent_at IS NULL
 ORDER BY created_at ASC, id ASC
@@ -132,6 +132,7 @@ func (q *Queries) FetchUnsentOutbox(ctx context.Context, limit int32) ([]TaskOut
 			&i.Payload,
 			&i.CreatedAt,
 			&i.SentAt,
+			&i.TraceContext,
 		); err != nil {
 			return nil, err
 		}
@@ -147,7 +148,7 @@ func (q *Queries) FetchUnsentOutbox(ctx context.Context, limit int32) ([]TaskOut
 }
 
 const fetchUnsentOutboxAfter = `-- name: FetchUnsentOutboxAfter :many
-SELECT id, aggregate_id, destination, event_type, payload, created_at, sent_at
+SELECT id, aggregate_id, destination, event_type, payload, created_at, sent_at, trace_context
 FROM task_outbox
 WHERE sent_at IS NULL AND (created_at > ? OR (created_at = ? AND id > ?))
 ORDER BY created_at ASC, id ASC
@@ -183,6 +184,7 @@ func (q *Queries) FetchUnsentOutboxAfter(ctx context.Context, arg FetchUnsentOut
 			&i.Payload,
 			&i.CreatedAt,
 			&i.SentAt,
+			&i.TraceContext,
 		); err != nil {
 			return nil, err
 		}
@@ -318,17 +320,18 @@ func (q *Queries) GetTaskCountByAccountId(ctx context.Context, ofAccountID uint6
 }
 
 const insertOutbox = `-- name: InsertOutbox :execresult
-INSERT INTO task_outbox (id, aggregate_id, destination, event_type, payload, created_at)
-VALUES (?, ?, ?, ?, ?, ?)
+INSERT INTO task_outbox (id, aggregate_id, destination, event_type, payload, created_at, trace_context)
+VALUES (?, ?, ?, ?, ?, ?, ?)
 `
 
 type InsertOutboxParams struct {
-	ID          string    `json:"id"`
-	AggregateID uint64    `json:"aggregate_id"`
-	Destination string    `json:"destination"`
-	EventType   string    `json:"event_type"`
-	Payload     []byte    `json:"payload"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID           string         `json:"id"`
+	AggregateID  uint64         `json:"aggregate_id"`
+	Destination  string         `json:"destination"`
+	EventType    string         `json:"event_type"`
+	Payload      []byte         `json:"payload"`
+	CreatedAt    time.Time      `json:"created_at"`
+	TraceContext sql.NullString `json:"trace_context"`
 }
 
 func (q *Queries) InsertOutbox(ctx context.Context, arg InsertOutboxParams) (sql.Result, error) {
@@ -339,6 +342,7 @@ func (q *Queries) InsertOutbox(ctx context.Context, arg InsertOutboxParams) (sql
 		arg.EventType,
 		arg.Payload,
 		arg.CreatedAt,
+		arg.TraceContext,
 	)
 }
 

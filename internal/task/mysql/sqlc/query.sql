@@ -78,8 +78,8 @@ FROM tasks
 WHERE id = ?;
 
 -- name: InsertOutbox :execresult
-INSERT INTO task_outbox (id, aggregate_id, destination, event_type, payload, created_at)
-VALUES (?, ?, ?, ?, ?, ?);
+INSERT INTO task_outbox (id, aggregate_id, destination, event_type, payload, created_at, trace_context)
+VALUES (?, ?, ?, ?, ?, ?, ?);
 
 -- name: FetchUnsentOutbox :many
 SELECT *
