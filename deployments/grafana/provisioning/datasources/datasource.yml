@@ -7,3 +7,11 @@ datasources:
     access: proxy
     url: http://prometheus:9090
     isDefault: true
+  - name: Jaeger
+    uid: jaeger
+    type: jaeger
+    access: proxy
+    url: http://jaeger:16686
+    jsonData:
+      nodeGraph:
+        enabled: true
