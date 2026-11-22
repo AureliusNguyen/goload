@@ -36,6 +36,9 @@ type Config struct {
 	AuthTokenRegenerateBeforeExpiry string `envconfig:"AUTH_TOKEN_REGENERATE_BEFORE_EXPIRY" default:"1h"`
 	GRPCAddress                     string `envconfig:"AUTH_SERVICE_GRPC_ADDRESS"           default:"0.0.0.0:8081"`
 	MetricsAddress                  string `envconfig:"METRICS_ADDRESS"                     default:"0.0.0.0:9101"`
+
+	TracingOTLPEndpoint string  `envconfig:"OTEL_EXPORTER_OTLP_ENDPOINT"`
+	TracingSampleRatio  float64 `envconfig:"TRACING_SAMPLE_RATIO" default:"1"`
 }
 
 func loadConfig() (*Config, error) {

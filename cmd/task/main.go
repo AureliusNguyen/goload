@@ -18,7 +18,6 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/oklog/run"
 	"github.com/redis/go-redis/v9"
-	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 
 	"github.com/yuisofull/goload/internal/observability"
@@ -57,6 +56,17 @@ func main() {
 		os.Exit(1)
 	}
 	defer func() { _ = rec.Shutdown(context.Background()) }()
+
+	tracer, err := observability.NewTracer(context.Background(), "task", observability.TraceConfig{
+		Endpoint:    config.TracingOTLPEndpoint,
+		SampleRatio: config.TracingSampleRatio,
+	})
+	if err != nil {
+		level.Error(logger).Log("msg", "failed to init tracing", "err", err)
+		os.Exit(1)
+	}
+	defer func() { _ = tracer.Shutdown(context.Background()) }()
+	observability.LogErrors(func(err error) { level.Warn(logger).Log("msg", "telemetry error", "err", err) })
 
 	// Setup MySQL
 	var db *sql.DB
@@ -141,7 +151,7 @@ func main() {
 
 	// Outbox relay: publishes the TaskCreated rows that CreateTask/RetryTask
 	// write in the task transaction, on the same Kafka topic as before.
-	outboxRelay := taskpkg.NewOutboxRelay(outboxRepo, dep, taskpkg.WithOutboxRelayLogger(logger), taskpkg.WithOutboxRelayMetrics(rec))
+	outboxRelay := taskpkg.NewOutboxRelay(outboxRepo, dep, taskpkg.WithOutboxRelayLogger(logger), taskpkg.WithOutboxRelayMetrics(rec), taskpkg.WithOutboxRelayTracing(tracer))
 	if err := rec.RegisterOutboxGauge(func(ctx context.Context) (int64, float64, error) {
 		n, oldest, berr := outboxRepo.OutboxBacklog(ctx)
 		if berr != nil {
@@ -258,19 +268,19 @@ func main() {
 		svcOpts = append(svcOpts, taskpkg.WithTokenStore(ts))
 	}
 
-	svc := taskpkg.NewService(repo, *dep, tx, outboxRepo, attemptRepo, append(svcOpts, taskpkg.WithLogger(logger))...)
+	svc := taskpkg.NewService(repo, *dep, tx, outboxRepo, attemptRepo, append(svcOpts, taskpkg.WithLogger(logger), taskpkg.WithTracing(tracer))...)
 
 	var attemptSvc *taskpkg.AttemptService
 	var reconciler *taskpkg.Reconciler
 	if ownershipMode {
-		attemptSvc = taskpkg.NewAttemptService(attemptRepo, tx, outboxRepo, taskpkg.WithMetrics(rec))
+		attemptSvc = taskpkg.NewAttemptService(attemptRepo, tx, outboxRepo, taskpkg.WithMetrics(rec), taskpkg.WithAttemptTracing(tracer))
 		reconciler = taskpkg.NewReconciler(reconcileRepo, repo, outboxRepo, taskpkg.WithReconcilerLogger(logger), taskpkg.WithReconcilerMetrics(rec))
 	}
 
 	endpointSet := taskendpoint.New(svc)
 
 	grpcServer := grpc.NewServer(
-		grpc.StatsHandler(otelgrpc.NewServerHandler(otelgrpc.WithMeterProvider(rec.MeterProvider()))),
+		grpc.StatsHandler(observability.GRPCServerHandler(rec, tracer)),
 		grpc.ChainUnaryInterceptor(
 			middleware.RecoveryGRPCInterceptor(logger),
 			middleware.LoggingGRPCInterceptor(logger),

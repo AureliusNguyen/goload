@@ -19,7 +19,6 @@ import (
 	"github.com/go-llsqlite/crawshaw/sqlitex"
 	"github.com/google/uuid"
 	"github.com/oklog/run"
-	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/yuisofull/goload/internal/apigateway"
 	"github.com/yuisofull/goload/internal/auth"
@@ -99,6 +98,17 @@ func main() {
 	}
 	defer func() { _ = rec.Shutdown(context.Background()) }()
 
+	tracer, err := observability.NewTracer(context.Background(), "pocket", observability.TraceConfig{
+		Endpoint:    cfg.TracingOTLPEndpoint,
+		SampleRatio: cfg.TracingSampleRatio,
+	})
+	if err != nil {
+		level.Error(logger).Log("msg", "failed to init tracing", "err", err)
+		os.Exit(1)
+	}
+	defer func() { _ = tracer.Shutdown(context.Background()) }()
+	observability.LogErrors(func(err error) { level.Warn(logger).Log("msg", "telemetry error", "err", err) })
+
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
@@ -167,7 +177,7 @@ func main() {
 	taskPub := task.NewEventPublisher(pub, task.WithOutboxTransport(task.NewRequireSubscriberTransport(pub)))
 	// Outbox relay: publishes the TaskCreated rows that CreateTask/RetryTask
 	// write in the task transaction, on the same in-memory bus as before.
-	outboxRelay := task.NewOutboxRelay(outboxRepo, taskPub, task.WithOutboxRelayLogger(logger), task.WithOutboxRelayMetrics(rec))
+	outboxRelay := task.NewOutboxRelay(outboxRepo, taskPub, task.WithOutboxRelayLogger(logger), task.WithOutboxRelayMetrics(rec), task.WithOutboxRelayTracing(tracer))
 	if err := rec.RegisterOutboxGauge(func(ctx context.Context) (int64, float64, error) {
 		n, oldest, berr := outboxRepo.OutboxBacklog(ctx)
 		if berr != nil {
@@ -205,12 +215,13 @@ func main() {
 		task.WithTokenStore(tokenStore),
 		task.WithTaskSourceStore(storageBackend),
 		task.WithTaskSourcePresigner(storageBackend),
+		task.WithTracing(tracer),
 	)
 
 	// Ownership API: the download worker claims every task through it, renews
 	// the lease while it runs and commits the result under the generation of
 	// its claim. workerID identifies this process as the owner.
-	attemptSvc := task.NewAttemptService(attemptRepo, tx, outboxRepo, task.WithMetrics(rec))
+	attemptSvc := task.NewAttemptService(attemptRepo, tx, outboxRepo, task.WithMetrics(rec), task.WithAttemptTracing(tracer))
 	workerID := uuid.NewString()
 	// Reconciler: dispatches due PENDING tasks and attempts whose lease
 	// expired again. This is what recovers work after a crash.
@@ -228,6 +239,7 @@ func main() {
 		downloadPub,
 		download.WithStorageType(storage.TypeLocal),
 		download.WithMetrics(rec),
+		download.WithTracing(tracer),
 		download.WithErrorHandler(func(_ context.Context, err error) {
 			level.Error(logger).Log("msg", "download failed", "err", err)
 		}),
@@ -244,10 +256,11 @@ func main() {
 
 	// Every dispatch runs as a claimed attempt and is acknowledged only once
 	// its outcome is committed.
-	consumer := downloadtransport.NewEventConsumer(dlSvc, sub, logger, downloadtransport.WithAttemptRunner(dlSvc), downloadtransport.WithMetrics(rec))
+	consumer := downloadtransport.NewEventConsumer(dlSvc, sub, logger, downloadtransport.WithAttemptRunner(dlSvc), downloadtransport.WithMetrics(rec), downloadtransport.WithTracing(tracer))
 
 	endpoints := apigateway.NewGatewayEndpoints(taskSvc, authMiddleware, authSvc)
 	handler := apigateway.NewHTTPHandlerWithDownload(endpoints, logger, storageBackend, tokenStore)
+	handler.Use(observability.RouteSpanNames)
 
 	if cfg.PocketWebDir != "" {
 		handler.PathPrefix("/").Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -275,7 +288,7 @@ func main() {
 	httpHandler = middleware.LoggingHTTPMiddleware(logger)(httpHandler)
 	httpHandler = middleware.RequestIDHTTPMiddleware(httpHandler)
 
-	httpHandler = otelhttp.NewHandler(httpHandler, "http", otelhttp.WithMeterProvider(rec.MeterProvider()))
+	httpHandler = observability.PublicHTTPHandler(httpHandler, rec, tracer)
 
 	var g run.Group
 	{

@@ -14,7 +14,6 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/oklog/run"
 	"github.com/redis/go-redis/v9"
-	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
@@ -46,12 +45,31 @@ func main() {
 		logger = log.With(logger, "caller", log.DefaultCaller)
 	}
 
+	rec, metricsHandler, err := observability.NewRecorder("gateway")
+	if err != nil {
+		level.Error(logger).Log("msg", "failed to init metrics", "err", err)
+		os.Exit(1)
+	}
+	defer func() { _ = rec.Shutdown(context.Background()) }()
+
+	tracer, err := observability.NewTracer(context.Background(), "gateway", observability.TraceConfig{
+		Endpoint:    config.TracingOTLPEndpoint,
+		SampleRatio: config.TracingSampleRatio,
+	})
+	if err != nil {
+		level.Error(logger).Log("msg", "failed to init tracing", "err", err)
+		os.Exit(1)
+	}
+	defer func() { _ = tracer.Shutdown(context.Background()) }()
+	observability.LogErrors(func(err error) { level.Warn(logger).Log("msg", "telemetry error", "err", err) })
+
 	// Connect to Auth Service via gRPC
 	var authService auth.Service
 	{
 		conn, err := grpc.NewClient(
 			config.AuthServiceGRPCAddress,
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithStatsHandler(observability.GRPCClientHandler(rec, tracer)),
 		)
 		if err != nil {
 			level.Error(logger).Log("err", err, "msg", "failed to connect to auth service")
@@ -68,6 +86,7 @@ func main() {
 		conn, err := grpc.NewClient(
 			config.TaskServiceGRPCAddress,
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithStatsHandler(observability.GRPCClientHandler(rec, tracer)),
 		)
 		if err != nil {
 			level.Error(logger).Log("err", err, "msg", "failed to connect to download task service")
@@ -128,6 +147,7 @@ func main() {
 
 	// /download?token=...  → fallback: validate token, stream bytes from MinIO
 	r := apigateway.NewHTTPHandlerWithDownload(gatewayEndpoints, logger, storageBackend, tokenStore)
+	r.Use(observability.RouteSpanNames)
 
 	r.Walk(func(route *mux.Route, router *mux.Router, ancestors []*mux.Route) error {
 		pathTemplate, _ := route.GetPathTemplate()
@@ -153,13 +173,7 @@ func main() {
 	httpHandler = middleware.LoggingHTTPMiddleware(logger)(httpHandler)
 	httpHandler = middleware.RequestIDHTTPMiddleware(httpHandler)
 
-	rec, metricsHandler, err := observability.NewRecorder("gateway")
-	if err != nil {
-		level.Error(logger).Log("msg", "failed to init metrics", "err", err)
-		os.Exit(1)
-	}
-	defer func() { _ = rec.Shutdown(context.Background()) }()
-	base := otelhttp.NewHandler(httpHandler, "http", otelhttp.WithMeterProvider(rec.MeterProvider()))
+	base := observability.PublicHTTPHandler(httpHandler, rec, tracer)
 	httpHandler = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.URL.Path == "/metrics" {
 			metricsHandler.ServeHTTP(w, req)

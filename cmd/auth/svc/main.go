@@ -18,7 +18,6 @@ import (
 	"github.com/go-kit/log/level"
 	"github.com/oklog/run"
 	"github.com/redis/go-redis/v9"
-	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 
 	"github.com/yuisofull/goload/internal/auth"
@@ -56,6 +55,17 @@ func main() {
 		os.Exit(1)
 	}
 	defer func() { _ = rec.Shutdown(context.Background()) }()
+
+	tracer, err := observability.NewTracer(context.Background(), "auth", observability.TraceConfig{
+		Endpoint:    config.TracingOTLPEndpoint,
+		SampleRatio: config.TracingSampleRatio,
+	})
+	if err != nil {
+		level.Error(logger).Log("msg", "failed to init tracing", "err", err)
+		os.Exit(1)
+	}
+	defer func() { _ = tracer.Shutdown(context.Background()) }()
+	observability.LogErrors(func(err error) { level.Warn(logger).Log("msg", "telemetry error", "err", err) })
 
 	var redisClient *redis.Client
 	{
@@ -168,7 +178,7 @@ func main() {
 		}
 
 		baseServer := grpc.NewServer(
-			grpc.StatsHandler(otelgrpc.NewServerHandler(otelgrpc.WithMeterProvider(rec.MeterProvider()))),
+			grpc.StatsHandler(observability.GRPCServerHandler(rec, tracer)),
 			grpc.ChainUnaryInterceptor(
 				middleware.RecoveryGRPCInterceptor(logger),
 				middleware.LoggingGRPCInterceptor(logger),
