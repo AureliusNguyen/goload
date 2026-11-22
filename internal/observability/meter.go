@@ -52,17 +52,9 @@ func NewRecorder(serviceName string) (*Recorder, http.Handler, error) {
 		return nil, nil, err
 	}
 
-	res, err := resource.Merge(
-		resource.Default(),
-		resource.NewWithAttributes(semconv.SchemaURL, semconv.ServiceName(serviceName)),
-	)
-	if err != nil {
-		res = resource.NewWithAttributes(semconv.SchemaURL, semconv.ServiceName(serviceName))
-	}
-
 	mp := sdkmetric.NewMeterProvider(
 		sdkmetric.WithReader(exporter),
-		sdkmetric.WithResource(res),
+		sdkmetric.WithResource(newResource(serviceName)),
 		// otelhttp fills server.address/server.port from the client-controlled
 		// Host header; drop them so a public /metrics cannot be grown without
 		// bound. The cardinality limit is a backstop for any other instrument.
@@ -218,3 +210,15 @@ func (r *Recorder) RegisterTasksByStatusGauge(read func(ctx context.Context) (ma
 func (r *Recorder) MeterProvider() metric.MeterProvider { return r.mp }
 
 func (r *Recorder) Shutdown(ctx context.Context) error { return r.mp.Shutdown(ctx) }
+
+// newResource identifies serviceName for both the meter and the tracer.
+func newResource(serviceName string) *resource.Resource {
+	res, err := resource.Merge(
+		resource.Default(),
+		resource.NewWithAttributes(semconv.SchemaURL, semconv.ServiceName(serviceName)),
+	)
+	if err != nil {
+		return resource.NewWithAttributes(semconv.SchemaURL, semconv.ServiceName(serviceName))
+	}
+	return res
+}
