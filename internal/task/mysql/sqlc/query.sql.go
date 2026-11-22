@@ -346,6 +346,26 @@ func (q *Queries) InsertOutbox(ctx context.Context, arg InsertOutboxParams) (sql
 	)
 }
 
+const latestOutboxTraceContext = `-- name: LatestOutboxTraceContext :one
+SELECT trace_context
+FROM task_outbox
+WHERE aggregate_id = ? AND event_type = ?
+ORDER BY created_at DESC, id DESC
+LIMIT 1
+`
+
+type LatestOutboxTraceContextParams struct {
+	AggregateID uint64 `json:"aggregate_id"`
+	EventType   string `json:"event_type"`
+}
+
+func (q *Queries) LatestOutboxTraceContext(ctx context.Context, arg LatestOutboxTraceContextParams) (sql.NullString, error) {
+	row := q.db.QueryRowContext(ctx, latestOutboxTraceContext, arg.AggregateID, arg.EventType)
+	var trace_context sql.NullString
+	err := row.Scan(&trace_context)
+	return trace_context, err
+}
+
 const listReconcilable = `-- name: ListReconcilable :many
 SELECT id, attempt_generation
 FROM tasks

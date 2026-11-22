@@ -348,3 +348,39 @@ func TestOutboxRepo_FetchUnsent_CursorUsesKeysetPredicate(t *testing.T) {
 	require.Contains(t, calls[0].query, "ORDER BY created_at ASC, id ASC")
 	require.Equal(t, []driver.Value{created, created, "evt-2", int64(5)}, calls[0].args)
 }
+
+func TestOutboxRepo_InsertUnsent_BindsTheTraceContextAsJSON(t *testing.T) {
+	fake, db := openFakeDB(t)
+	ev := sampleOutboxEvent()
+	ev.TraceContext = map[string]string{"traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"}
+
+	require.NoError(t, NewOutboxRepo(db).InsertUnsent(context.Background(), ev))
+
+	_, calls := fake.snapshot()
+	require.Len(t, calls, 1)
+	require.Equal(t, `{"traceparent":"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"}`, calls[0].args[6])
+}
+
+func TestOutboxRepo_LatestTraceContext_ReadsTheNewestRowOfTheTaskAndType(t *testing.T) {
+	fake, db := openFakeDB(t)
+	fake.columns = []string{"trace_context"}
+	fake.rows = [][]driver.Value{{`{"traceparent":"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"}`}}
+
+	got, err := NewOutboxRepo(db).LatestTraceContext(context.Background(), 42, task.OutboxEventTaskCreated)
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{"traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"}, got)
+
+	_, calls := fake.snapshot()
+	require.Len(t, calls, 1)
+	require.Contains(t, calls[0].query, "ORDER BY created_at DESC, id DESC")
+	require.Equal(t, []driver.Value{int64(42), "TaskCreated"}, calls[0].args)
+}
+
+func TestOutboxRepo_LatestTraceContext_NoRowIsNil(t *testing.T) {
+	fake, db := openFakeDB(t)
+	fake.columns = []string{"trace_context"}
+
+	got, err := NewOutboxRepo(db).LatestTraceContext(context.Background(), 42, task.OutboxEventTaskCreated)
+	require.NoError(t, err)
+	require.Nil(t, got)
+}

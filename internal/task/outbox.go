@@ -102,6 +102,9 @@ type OutboxRepository interface {
 	// of the oldest one (zero time when there are none). It drives the backlog
 	// gauges; a single COUNT + MIN, never derived from a fetched page.
 	OutboxBacklog(ctx context.Context) (unsent int64, oldest time.Time, err error)
+	// LatestTraceContext returns the trace carrier of the aggregate's newest
+	// row of eventType, or nil when there is none or it has no carrier.
+	LatestTraceContext(ctx context.Context, aggregateID uint64, eventType string) (map[string]string, error)
 }
 
 // NewTaskCreatedOutboxEvent builds the outbox row for a TaskCreated event. The

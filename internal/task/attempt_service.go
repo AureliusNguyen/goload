@@ -26,6 +26,7 @@ type AttemptService struct {
 	lease    time.Duration
 	backoff  func(retryCount int) time.Duration
 	metrics  Metrics
+	tracing  Tracing
 }
 
 // AttemptServiceOption configures an AttemptService.
@@ -85,6 +86,7 @@ func NewAttemptService(
 		lease:    DefaultLeaseDuration,
 		backoff:  DefaultRetryBackoff,
 		metrics:  nopMetrics{},
+		tracing:  nopTracing{},
 	}
 	for _, o := range opts {
 		o(s)
@@ -240,6 +242,7 @@ func (s *AttemptService) CompleteAttempt(
 		// The outbox relay publishes it after commit.
 		event, err := NewTaskCompletedOutboxEvent(taskID, result, now.UTC())
 		if err == nil {
+			event.TraceContext = s.tracing.Inject(ctx)
 			err = s.outbox.InsertUnsent(ctx, event)
 		}
 		if err != nil {
@@ -296,6 +299,7 @@ func (s *AttemptService) FailAttempt(
 		// a bus observer sees the failure exactly as it sees a completion.
 		event, err := NewTaskFailedOutboxEvent(taskID, message, now.UTC())
 		if err == nil {
+			event.TraceContext = s.tracing.Inject(ctx)
 			err = s.outbox.InsertUnsent(ctx, event)
 		}
 		if err != nil {

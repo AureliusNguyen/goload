@@ -268,8 +268,8 @@ sweep:
 }
 
 // redispatch enqueues a TaskCreated outbox row for the task, the same
-// dispatch CreateTask writes. It reports false without an error when the task
-// no longer exists.
+// dispatch CreateTask writes, in the trace of the task's last dispatch. It
+// reports false without an error when the task no longer exists.
 func (r *Reconciler) redispatch(ctx context.Context, taskID uint64) (bool, error) {
 	t, err := r.tasks.GetByID(ctx, taskID)
 	if err != nil {
@@ -282,6 +282,10 @@ func (r *Reconciler) redispatch(ctx context.Context, taskID uint64) (bool, error
 	event, err := NewTaskCreatedOutboxEvent(t)
 	if err != nil {
 		return false, fmt.Errorf("build dispatch event for task %d: %w", taskID, err)
+	}
+	event.TraceContext, err = r.outbox.LatestTraceContext(ctx, taskID, OutboxEventTaskCreated)
+	if err != nil {
+		_ = level.Warn(r.logger).Log("msg", "redispatch without trace context", "task_id", taskID, "err", err)
 	}
 	if err := r.outbox.InsertUnsent(ctx, event); err != nil {
 		return false, fmt.Errorf("enqueue dispatch event for task %d: %w", taskID, err)

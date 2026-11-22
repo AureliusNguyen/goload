@@ -3,6 +3,7 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 
 	task "github.com/yuisofull/goload/internal/task"
@@ -86,6 +87,20 @@ func (r *outboxRepo) MarkSent(ctx context.Context, id string) error {
 		SentAt: sql.NullTime{Time: time.Now().UTC().Truncate(time.Microsecond), Valid: true},
 		ID:     id,
 	})
+}
+
+func (r *outboxRepo) LatestTraceContext(ctx context.Context, aggregateID uint64, eventType string) (map[string]string, error) {
+	tc, err := r.q(ctx).LatestOutboxTraceContext(ctx, sqlc.LatestOutboxTraceContextParams{
+		AggregateID: aggregateID,
+		EventType:   eventType,
+	})
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && !tc.Valid) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return task.UnmarshalTraceContext(tc.String), nil
 }
 
 func (r *outboxRepo) OutboxBacklog(ctx context.Context) (int64, time.Time, error) {

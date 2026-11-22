@@ -100,6 +100,13 @@ UPDATE task_outbox
 SET sent_at = ?
 WHERE id = ? AND sent_at IS NULL;
 
+-- name: LatestOutboxTraceContext :one
+SELECT trace_context
+FROM task_outbox
+WHERE aggregate_id = ? AND event_type = ?
+ORDER BY created_at DESC, id DESC
+LIMIT 1;
+
 -- name: OutboxBacklog :one
 SELECT COUNT(*) AS unsent, MIN(created_at) AS oldest
 FROM task_outbox

@@ -32,6 +32,7 @@ type OutboxRelay struct {
 	batchSize int
 	logger    log.Logger
 	metrics   Metrics
+	tracing   Tracing
 }
 
 // OutboxRelayOption configures an OutboxRelay.
@@ -80,6 +81,7 @@ func NewOutboxRelay(repo OutboxRepository, pub *Publisher, opts ...OutboxRelayOp
 		batchSize: DefaultOutboxBatchSize,
 		logger:    log.NewNopLogger(),
 		metrics:   nopMetrics{},
+		tracing:   nopTracing{},
 	}
 	for _, o := range opts {
 		o(r)
@@ -158,7 +160,14 @@ func (r *OutboxRelay) RunOnce(ctx context.Context) (int, error) {
 }
 
 func (r *OutboxRelay) relayOne(ctx context.Context, event OutboxEvent) error {
-	if err := r.pub.PublishOutboxEvent(ctx, event); err != nil {
+	// The publish span continues the trace stored with the row; the message
+	// carries the span's own carrier so the consumer continues from it.
+	topic, _ := outboxTopic(event.EventType)
+	outgoing, endSpan := r.tracing.StartPublish(ctx, event.TraceContext, topic, event.ID)
+	event.TraceContext = outgoing
+	err := r.pub.PublishOutboxEvent(ctx, event)
+	endSpan(err)
+	if err != nil {
 		r.metrics.RecordRelayPublish(false)
 		return fmt.Errorf("publish outbox event %s: %w", event.ID, err)
 	}

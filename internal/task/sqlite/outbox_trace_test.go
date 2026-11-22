@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/go-llsqlite/crawshaw/sqlitex"
 	"github.com/stretchr/testify/require"
@@ -78,4 +79,28 @@ VALUES (?, ?, ?, ?, ?, ?, NULL)`,
 	require.Len(t, got, 1)
 	require.Equal(t, "old-1", got[0].ID)
 	require.Nil(t, got[0].TraceContext, "a pre-tracing row has no trace context")
+}
+
+func TestOutboxRepo_LatestTraceContextIsTheNewestRowOfTheTaskAndType(t *testing.T) {
+	repo := NewOutboxRepo(newTestPool(t))
+	ctx := context.Background()
+	at := outboxTestTime()
+
+	older := newOutboxEvent("evt-older", 1, at)
+	older.TraceContext = map[string]string{"traceparent": "00-11111111111111111111111111111111-1111111111111111-01"}
+	newer := newOutboxEvent("evt-newer", 1, at.Add(time.Second))
+	newer.TraceContext = map[string]string{"traceparent": "00-22222222222222222222222222222222-2222222222222222-01"}
+	otherTask := newOutboxEvent("evt-other", 2, at.Add(2*time.Second))
+	otherTask.TraceContext = map[string]string{"traceparent": "00-33333333333333333333333333333333-3333333333333333-01"}
+	for _, ev := range []task.OutboxEvent{older, newer, otherTask} {
+		require.NoError(t, repo.InsertUnsent(ctx, ev))
+	}
+
+	got, err := repo.LatestTraceContext(ctx, 1, task.OutboxEventTaskCreated)
+	require.NoError(t, err)
+	require.Equal(t, newer.TraceContext, got)
+
+	none, err := repo.LatestTraceContext(ctx, 99, task.OutboxEventTaskCreated)
+	require.NoError(t, err)
+	require.Nil(t, none)
 }

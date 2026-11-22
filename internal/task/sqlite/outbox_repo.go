@@ -110,6 +110,27 @@ func (r *outboxRepo) MarkSent(ctx context.Context, id string) error {
 	})
 }
 
+func (r *outboxRepo) LatestTraceContext(ctx context.Context, aggregateID uint64, eventType string) (map[string]string, error) {
+	var carrier map[string]string
+	err := r.withConn(ctx, func(conn *sqlite.Conn) error {
+		return sqlitex.Execute(
+			conn,
+			`SELECT trace_context FROM task_outbox WHERE aggregate_id = ? AND event_type = ?
+ORDER BY created_at DESC, id DESC LIMIT 1`,
+			&sqlitex.ExecOptions{
+				Args: []any{aggregateID, eventType},
+				ResultFunc: func(stmt *sqlite.Stmt) error {
+					if stmt.ColumnType(0) != sqlite.SQLITE_NULL {
+						carrier = task.UnmarshalTraceContext(stmt.ColumnText(0))
+					}
+					return nil
+				},
+			},
+		)
+	})
+	return carrier, err
+}
+
 func (r *outboxRepo) OutboxBacklog(ctx context.Context) (int64, time.Time, error) {
 	var count int64
 	var oldest time.Time
