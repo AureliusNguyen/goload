@@ -15,6 +15,7 @@ import (
 	kitgrpc "github.com/go-kit/kit/transport/grpc"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/oklog/run"
 	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
